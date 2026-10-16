@@ -21,7 +21,7 @@ change.
   was running partly interpreted: "register coalescing too complex"). A crash-sized dent on a 70,000-vertex test
   body (about 33,000 vertices moved) went from about 46 ms of work to about 26 ms, spread over frames.
 
-## New in 0.7.2: the real cause of the slowdown (from your trace)
+## New in 0.7.2: the real cause of the slowdown (from a tester's trace)
 
 The trace showed it: on some cars a mesh sits far from the body (hundreds of metres; the crash lines put hits
 "314 m from the middle"), so the box the hull was built over was hundreds of metres long, and those cars got
@@ -133,7 +133,8 @@ vertex exactly with it, dents stay on the side hit, nothing on the dented side g
 vertex moves more than the dent. Pinning a 120,000-vertex body is about half a second of work, spread over
 frames while the car is read. Not tested in AC yet.
 
-This first version is for finding out what works in the game, so it has test dents and shows timings.
+It's still a prototype: it has test dents and shows its timings, and the trace file records every step.
+Needs Custom Shaders Patch (its Lua apps). Tests run offline with LuaJIT (see Tests).
 
 ## Install
 
