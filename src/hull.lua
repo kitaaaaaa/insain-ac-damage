@@ -16,6 +16,7 @@ local sqrt, floor, atan2, pi = math.sqrt, math.floor, math.atan2, math.pi
 -- ringSpacing apart, `around` atoms on each. tick() is called now and then (for yielding).
 function M.new(meshes, min, max, ringSpacing, around, tick)
   local len = math.max(max[3] - min[3], 1e-3)
+  ringSpacing = math.max(ringSpacing, len / 60)  -- (a safety net: 61 rings at most)
   local K = math.max(2, math.ceil(len / ringSpacing) + 1)
   local step = len / (K - 1)
   local cx = (min[1] + max[1]) / 2
@@ -162,7 +163,7 @@ function M.new(meshes, min, max, ringSpacing, around, tick)
     local grid, pick, edge = e == 1 and front or back, e == 1 and less or more, min[3] + k * step
     local reach = 0
     for s = 0, A - 1 do reach = math.max(reach, rad[k][s]) end
-    local C = math.max(2, math.ceil(reach / ringSpacing))  -- rings from the edge to the middle
+    local C = math.min(8, math.max(2, math.ceil(reach / ringSpacing)))  -- rings from the edge to the middle
     local cap = {first = n, rings = C - 1}
     for c = 1, C - 1 do
       local frac = 1 - c / C

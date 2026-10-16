@@ -6,6 +6,27 @@ vertex of the body is pinned to the hull's triangles and follows them. 1nsane's 
 by hand; here the hull is built from the car's own meshes. Visual only: AC's physics and collisions don't
 change.
 
+## New in 0.7.2: the real cause of the slowdown (from your trace)
+
+The trace showed it: on some cars a mesh sits far from the body (hundreds of metres; the crash lines put hits
+"314 m from the middle"), so the box the hull was built over was hundreds of metres long, and those cars got
+hulls of 45,000-75,000 atoms instead of about 600. Every dent on them went over all of those atoms and some
+200,000 springs, ten times; and the same lever arm made tiny bumps look like hard hits (600 crash dents in two
+minutes). And 12 cars came to 2.8 million vertices.
+
+- **The car's box comes from AC** (its bounding box for the car). A mesh whose middle is more than 1 m outside
+  it is left alone (the parts list says so, with how far out it is), and the hull's box goes no more than 0.6 m
+  past AC's. Without a box from AC, it's around the middle of the car's meshes. And a safety net: at most 61
+  rings along any hull.
+- **A vertex budget**: 1 million vertices read in all (about 250 MB with AC's copies; a setting), the nearest cars
+  first. The watched car is always read. The window shows how much is used.
+- **One crash dent a frame** (the others wait their turn, 32 at most), **150,000 vertices sent to AC a frame**
+  at most (the rest the next frame), and **3 crashes kept** at most for a car not read yet (the hardest).
+
+Checked offline: with a mesh 300 m out, 0.7.1 made a 303 m box and a 20,342-atom hull (the test fails on it);
+0.7.2 leaves that mesh alone and builds a 4.5 m box. The budget stops the second car being read; two cars
+crashing in the same frame get their dents one frame apart.
+
 ## New in 0.7.1: performance with many damaged cars
 
 0.7.0 got slower with each damaged car. What grew with them:

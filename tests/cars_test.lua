@@ -75,6 +75,49 @@ H2.settle()
 for _ = 1, 10 do H2.frame() end
 H2.settle()
 check(H2.state.cars[0] and not H2.state.cars[1], 'all cars off: only the watched one read')
+-- a mesh 300 m from the body (seen on real cars): left alone; the hull and the crash lever arm stay car-sized
+local H3 = require('tests/scene_mock')({n = 10, farMesh = true})
+H3.load()
+H3.settle()
+for _ = 1, 5 do H3.frame() end
+H3.settle()
+local b3 = H3.state.cars[0]
+check(b3 and b3.state == 'ready', 'read with a far mesh')
+local farStatus
+for _, part in ipairs(b3.parts) do if part.name == 'far_away_plane' then farStatus = part.status end end
+check(farStatus and farStatus:find('outside the car', 1, true), 'the far mesh left alone: ' .. tostring(farStatus))
+check(b3.max[3] - b3.min[3] < 5 and b3.atoms.count < 1500, ('the box and hull car-sized: %.1f m long, %d atoms'):format(b3.max[3] - b3.min[3], b3.atoms.count))
+-- a vertex budget: with room for one car only, the other isn't read (the watched one always is)
+local H4 = require('tests/scene_mock')({n = 10, cars = 2})
+H4.storage.maxVertices = 700
+H4.load()
+H4.settle()
+for _ = 1, 10 do H4.frame() end
+H4.settle()
+check(H4.state.cars[0] and not H4.state.cars[1], ('budget full: the other car not read (%d vertices)'):format(H4.state.cars[0] and H4.state.cars[0].vertices or -1))
+-- a crash dent at most a frame
+local H5 = require('tests/scene_mock')({n = 10, cars = 2})
+H5.load()
+H5.settle()
+for _ = 1, 10 do H5.frame() end
+H5.settle()
+local c5 = H5.state.cars
+local function hitBoth()
+  local f1, f2 = H5.bodyWorld:transformVector(vec3(0, 0, 1)), H5.body2World:transformVector(vec3(0, 0, 1))
+  local v = 0
+  while v < 12 do v = v + 5 / 60 H5.car.velocity:set(f1 * v) H5.car2.velocity:set(f2 * v) H5.frame() end
+  for _ = 1, 20 do H5.frame() end
+  H5.car.velocity:set(f1 * 0.5) H5.car2.velocity:set(f2 * 0.5)
+end
+hitBoth()
+local maxInFrame = 0
+for _ = 1, 30 do
+  local before = (c5[0].crashes or 0) + (c5[1].crashes or 0)
+  H5.frame()
+  maxInFrame = math.max(maxInFrame, (c5[0].crashes or 0) + (c5[1].crashes or 0) - before)
+end
+check((c5[0].crashes or 0) == 1 and (c5[1].crashes or 0) == 1, ('both cars dented: %s, %s'):format(tostring(c5[0].crashes), tostring(c5[1].crashes)))
+check(maxInFrame == 1, 'one crash dent a frame at most: ' .. maxInFrame)
 for _, b in pairs(cars) do check(not b.error, 'no errors: ' .. tostring(b.error)) end
 print(fails == 0 and 'cars test passed' or ('cars test: ' .. fails .. ' failed'))
 os.exit(fails == 0 and 0 or 1)

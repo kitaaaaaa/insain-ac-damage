@@ -105,6 +105,10 @@ return function(opts)
   H.doorMesh = {name = 'door', parent = door, vertices = buffer({{0, 0, 0, 1, 0, 0}, {0, 0.1, 0, 1, 0, 0}, {0.1, 0, 0, 1, 0, 0}})}
   body.meshes = {H.bodyMesh}
   door.meshes = {H.doorMesh}
+  if opts.farMesh then  -- (as some cars have: a mesh hundreds of metres from the body, under BODYTR)
+    H.farMesh = {name = 'far_away_plane', parent = body, vertices = buffer({{0, 0, 300, 0, 1, 0}, {1, 0, 300, 0, 1, 0}, {0, 0, 301, 0, 1, 0}})}
+    body.meshes[#body.meshes + 1] = H.farMesh
+  end
   -- not bodywork: the driver (by its node) and a gauge needle (by its name)
   local driver = node('DRIVER:DRIVER', H.bodyWorld, body)
   H.driverMesh = {name = 'DRIVER:suit', parent = driver, vertices = buffer({{0, 0.5, 0, 0, 1, 0}, {0.1, 0.5, 0, 0, 1, 0}, {0, 0.6, 0, 0, 1, 0}})}
@@ -221,9 +225,11 @@ return function(opts)
     position = H.bodyWorld:transformPoint(vec3(0, 0.5, 0)),
     wheels = {[0] = {position = H.bodyWorld:transformPoint(vec3(0.8, 0.3, 1.4))}, {position = H.bodyWorld:transformPoint(vec3(-0.8, 0.3, 1.4))}}}
   car.distanceToCamera, car.isConnected, car.aabbSize = 5, true, vec3(1.8, 1.2, 4.4)
+  car.aabbCenter, car.bodyTransform = vec3(0, 0.6, 0), H.bodyWorld
   H.car = car
   local car2 = {look = H.body2World:transformVector(vec3(0, 0, 1)), up = vec3(0, 1, 0), velocity = vec3(), collisionDepth = 0,
     position = H.body2World:transformPoint(vec3(0, 0.5, 0)), distanceToCamera = 30, isConnected = true, aabbSize = vec3(1.8, 1.2, 4.4),
+    aabbCenter = vec3(0, 0.6, 0), bodyTransform = H.body2World,
     wheels = {[0] = {position = H.body2World:transformPoint(vec3(0.8, 0.3, 1.4))}, {position = H.body2World:transformPoint(vec3(-0.8, 0.3, 1.4))}}}
   H.car2 = car2
   H.detailed = {}
