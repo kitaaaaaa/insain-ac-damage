@@ -50,9 +50,10 @@ local settings = ac.storage{
   outsideBody = true,  -- also dent the car's meshes outside BODYTR (lights, glass, trim), unless on moving parts
   crashDents = true,   -- dents from crashes
   crashScale = 1,
-  budgetMs = 4,        -- work per frame on dents (re-skinning), first
+  instantMs = 12,      -- work on a new dent the frame it happens (most of it shows at once)
+  budgetMs = 4,        -- work per frame on dents (re-skinning) after that, first
   setupBudgetMs = 2,   -- then on reading cars
-  sendBudget = 150000, -- vertices sent to AC a frame at most (alterVertices), the rest the next
+  sendBudget = 400000, -- vertices sent to AC a frame at most (alterVertices), the rest the next
 }
 
 local sim = ac.getSim()
@@ -104,7 +105,12 @@ local function runPhase(setup, ms)
   end
 end
 local function runJobs()
-  runPhase(false, settings.budgetMs)
+  -- a new dent gets a bigger first slice (instantMs), so most of it shows the frame it happens
+  local ms = settings.budgetMs
+  for _, j in ipairs(jobs) do
+    if not j.setup and j.body.fresh then ms = math.max(ms, settings.instantMs) j.body.fresh = false end
+  end
+  runPhase(false, ms)
   runPhase(true, settings.setupBudgetMs)
 end
 -- yields when the frame's budget is used up
@@ -221,7 +227,9 @@ local function setupCar(i)
         local ex, ey, ez = toBody(vec3(1, 0, 0)) - o, toBody(vec3(0, 1, 0)) - o, toBody(vec3(0, 0, 1)) - o
         local function toMesh(v) return invParent:transformVector(bodyWorld:transformVector(v)) end
         local bx, by, bz = toMesh(vec3(1, 0, 0)), toMesh(vec3(0, 1, 0)), toMesh(vec3(0, 0, 1))
-        local mesh = {ref = ref, name = name, orig = verts, n = verts:size(), interior = kind == 'interior',  -- work: a copy made at the first dent
+        -- work: the copy read now, which the dents go into (no copying at crash time); op: the original positions
+        -- and normals (mesh space, 6 floats a vertex), to put back
+        local mesh = {ref = ref, name = name, work = verts, op = arrays.floats(verts:size() * 6), n = verts:size(), interior = kind == 'interior',
           px = arrays.floats(verts:size()), py = arrays.floats(verts:size()), pz = arrays.floats(verts:size()),
           nx = arrays.floats(verts:size()), ny = arrays.floats(verts:size()), nz = arrays.floats(verts:size()),
           moved = arrays.bytes(verts:size()), seen = arrays.ints(verts:size()),  -- (FFI: the GC doesn't walk them)
@@ -236,8 +244,10 @@ local function setupCar(i)
           .. ', ' .. verts:size() .. ' vertices'
         local raw = verts.raw
         local mmin, mmax = {1e9, 1e9, 1e9}, {-1e9, -1e9, -1e9}
+        local op = mesh.op
         for v = 0, mesh.n - 1 do
           local p, nn = raw[v].pos, raw[v].normal
+          op[v * 6], op[v * 6 + 1], op[v * 6 + 2], op[v * 6 + 3], op[v * 6 + 4], op[v * 6 + 5] = p.x, p.y, p.z, nn.x, nn.y, nn.z
           local x = o.x + ex.x * p.x + ey.x * p.y + ez.x * p.z
           local y = o.y + ex.y * p.x + ey.y * p.y + ez.y * p.z
           local z = o.z + ex.z * p.x + ey.z * p.y + ez.z * p.z
@@ -438,14 +448,21 @@ local function freshVertices(mesh, why)
   return v
 end
 
+-- A vertex back as it was (into mesh.work).
+local function putBack(mesh, v)
+  local r, op, k = mesh.work.raw[v], mesh.op, v * 6
+  r.pos.x, r.pos.y, r.pos.z = op[k], op[k + 1], op[k + 2]
+  r.normal.x, r.normal.y, r.normal.z = op[k + 3], op[k + 4], op[k + 5]
+end
+
 -- Shows a mesh's new vertices. 'direct': the car's own mesh takes them. 'copy': at its first dent, a copy of the
 -- mesh is made under the same node with the same material and the original hidden; the copy takes them.
 local function send(mesh)
-  if not mesh.work then return end  -- repaired or rebuilt since it was queued
+  if not mesh.work then return end
   if settings.method == 'direct' and not mesh.copy then
-    trace('alterVertices "%s" (%d vertices)', mesh.name, mesh.n)
+    if not mesh.sent then trace('alterVertices "%s" (%d vertices), first time', mesh.name, mesh.n) end
     mesh.ref:alterVertices(mesh.work)
-    trace('alterVertices "%s": done', mesh.name)
+    if not mesh.sent then trace('alterVertices "%s": done', mesh.name) end
     mesh.sent = true
     return
   end
@@ -501,7 +518,7 @@ end
 -- Moves one vertex with the atoms (into mesh.work) and says if it changed. Its own function, so the loop around
 -- it carries few values (LuaJIT compiles it).
 local function skinVertex(ctx, mesh, v)
-  local raw, orig = mesh.work.raw, mesh.orig.raw
+  local raw, op, k6 = mesh.work.raw, mesh.op, v * 6
   local ox, oy, oz, qx, qy, qz, crunch
   if ctx.isHull then
     ox, oy, oz, qx, qy, qz, crunch = hull.sample(ctx.l, mesh.bind, v)
@@ -512,8 +529,7 @@ local function skinVertex(ctx, mesh, v)
   end
   if not ox then
     if mesh.moved[v] == 1 then  -- back as it was
-      raw[v].pos.x, raw[v].pos.y, raw[v].pos.z = orig[v].pos.x, orig[v].pos.y, orig[v].pos.z
-      raw[v].normal.x, raw[v].normal.y, raw[v].normal.z = orig[v].normal.x, orig[v].normal.y, orig[v].normal.z
+      putBack(mesh, v)
       mesh.moved[v] = 0
       mesh.movedCount = (mesh.movedCount or 1) - 1
       return true
@@ -550,10 +566,10 @@ local function skinVertex(ctx, mesh, v)
   if crunch > 1e-4 then ox, oy, oz, qx, qy, qz = crunchVertex(ctx, mesh, v, ox, oy, oz, qx, qy, qz, crunch, limit) end
   -- the offset and normal into the mesh's own space
   local T = mesh.toMesh
-  local r, o = raw[v], orig[v]
-  r.pos.x = o.pos.x + T[1] * ox + T[4] * oy + T[7] * oz
-  r.pos.y = o.pos.y + T[2] * ox + T[5] * oy + T[8] * oz
-  r.pos.z = o.pos.z + T[3] * ox + T[6] * oy + T[9] * oz
+  local r = raw[v]
+  r.pos.x = op[k6] + T[1] * ox + T[4] * oy + T[7] * oz
+  r.pos.y = op[k6 + 1] + T[2] * ox + T[5] * oy + T[8] * oz
+  r.pos.z = op[k6 + 2] + T[3] * ox + T[6] * oy + T[9] * oz
   local mx, my, mz = T[1] * qx + T[4] * qy + T[7] * qz, T[2] * qx + T[5] * qy + T[8] * qz, T[3] * qx + T[6] * qy + T[9] * qz
   local ml = math.sqrt(mx * mx + my * my + mz * mz)
   if ml > 0 then r.normal.x, r.normal.y, r.normal.z = mx / ml, my / ml, mz / ml end
@@ -588,11 +604,7 @@ local function skin(body)
           if d > 0.01 ^ 2 then
             mesh.moving = true
             if mesh.work then  -- all of it back as it was
-              local r, o = mesh.work.raw, mesh.orig.raw
-              for v = 0, mesh.n - 1 do if mesh.moved[v] == 1 then
-                r[v].pos.x, r[v].pos.y, r[v].pos.z = o[v].pos.x, o[v].pos.y, o[v].pos.z
-                r[v].normal.x, r[v].normal.y, r[v].normal.z = o[v].normal.x, o[v].normal.y, o[v].normal.z
-              end end
+              for v = 0, mesh.n - 1 do if mesh.moved[v] == 1 then putBack(mesh, v) end end
               arrays.zero(mesh.moved, mesh.n)
               mesh.movedCount = 0
               changed[mesh] = true
@@ -611,7 +623,27 @@ local function skin(body)
       local ctx = {isHull = isHull, l = l, share = settings.interiorShare, maxBody = settings.maxBodyIn,
         maxInterior = settings.maxInteriorIn, maxCrunch = settings.maxCrunch, crunchFn = crunchFn,
         cf = 1 / settings.crunchSize, no = body.noiseOffset, noiseVer = body.noiseVer}
-      for key in pairs(isHull and hull.takeChanged(l) or lattice.takeChanged(l)) do
+      -- nearest the dent first: what's there shows in the first frame, the edges after
+      local keys = {}
+      for key in pairs(isHull and hull.takeChanged(l) or lattice.takeChanged(l)) do keys[#keys + 1] = key end
+      local at = body.lastDent
+      if at and #keys > 1 then
+        local dist = {}
+        for _, key in ipairs(keys) do
+          local x, y, z
+          if isHull then
+            local a, b, c = l.ta[key], l.tb[key], l.tc[key]
+            x, y, z = (l.ax[a] + l.ax[b] + l.ax[c]) / 3, (l.ay[a] + l.ay[b] + l.ay[c]) / 3, (l.az[a] + l.az[b] + l.az[c]) / 3
+          else
+            local nx, ny = l.n[1], l.n[2]
+            local ci, cj, ck = key % nx, math.floor(key / nx) % ny, math.floor(key / (nx * ny))
+            x, y, z = lattice.nodePos(l, ci + 0.5, cj + 0.5, ck + 0.5)
+          end
+          dist[key] = (x - at.x) ^ 2 + (y - at.y) ^ 2 + (z - at.z) ^ 2
+        end
+        table.sort(keys, function(p, q) return dist[p] < dist[q] end)
+      end
+      for _, key in ipairs(keys) do
         local list = body.users[key]
         if list then
           local la = list.a
@@ -623,9 +655,7 @@ local function skin(body)
             if mesh.seen[v] == pass then mesh = nil else mesh.seen[v] = pass end
             if mesh and mesh.moving then  -- a part that moves on its own: back as it was, and no more
               if mesh.work and mesh.moved[v] == 1 then
-                local r, o = mesh.work.raw, mesh.orig.raw
-                r[v].pos.x, r[v].pos.y, r[v].pos.z = o[v].pos.x, o[v].pos.y, o[v].pos.z
-                r[v].normal.x, r[v].normal.y, r[v].normal.z = o[v].normal.x, o[v].normal.y, o[v].normal.z
+                putBack(mesh, v)
                 mesh.moved[v] = 0
                 mesh.movedCount = (mesh.movedCount or 1) - 1
                 changed[mesh] = true
@@ -633,17 +663,19 @@ local function skin(body)
               mesh = nil
             end
             if mesh then
-              if not mesh.work and not mesh.failed then
-                mesh.work = freshVertices(mesh, 'to dent')
-                mesh.failed = mesh.work == nil  -- left as it is
-                if mesh.work and not mesh.noise then mesh.noise, mesh.noiseVer = arrays.floats(mesh.n * 4), arrays.bytes(mesh.n) end
-              end
-              if mesh.work and skinVertex(ctx, mesh, v) then changed[mesh] = true end
+              if not mesh.noise then mesh.noise, mesh.noiseVer = arrays.floats(mesh.n * 4), arrays.bytes(mesh.n) end
+              if skinVertex(ctx, mesh, v) then changed[mesh] = true end
             end
             count = count + 1
             if count % 1000 == 0 then
               local t = nowMs()
-              if t - t0 > jobBudget then work = work + (t - t0) t0 = coroutine.yield() end
+              if t - t0 > jobBudget then
+                -- what's done so far goes to AC now (the dent shows as it's made), the rest next frame
+                for mesh in pairs(changed) do sendQueue[#sendQueue + 1] = mesh end
+                changed = {}
+                work = work + (t - t0)
+                t0 = coroutine.yield()
+              end
             end
           end
         end
@@ -665,11 +697,13 @@ local function restoreNow(body)
       mesh.copy:dispose()
       mesh.copy = nil
       mesh.ref:setVisible(true)
-    elseif mesh.sent then
-      mesh.ref:alterVertices(mesh.orig)
     end
+    if mesh.movedCount and mesh.movedCount > 0 then
+      for v = 0, mesh.n - 1 do if mesh.moved[v] == 1 then putBack(mesh, v) end end
+    end
+    if mesh.sent and not mesh.moving then mesh.ref:alterVertices(mesh.work) end
     arrays.zero(mesh.moved, mesh.n)
-    mesh.sent, mesh.work, mesh.failed, mesh.movedCount = nil, nil, nil, 0
+    mesh.sent, mesh.movedCount = nil, 0
   end
 end
 -- unloading (AC closing, the app reloaded): the originals back
@@ -719,6 +753,7 @@ local function dentWorld(body, worldPos, worldDir, depth, radius, severity)
     crunchFor(depth, (severity or depth / 0.1) * give), settings.maxCrunch)
   body.dents = body.dents + 1
   body.lastDent = {x = p.x, y = p.y, z = p.z}
+  body.fresh = true
   skin(body)
   return true
 end
@@ -760,6 +795,7 @@ end
 -- over the next 150 ms is the hit, and from 2.5 m/s at the contact point it dents there. A push from below (a
 -- landing) counts 15%: the suspension takes it. A teleport (over 5 m in a frame) isn't a crash.
 local IMPACT_ACCEL, IMPACT_WINDOW, MIN_HIT, COOLDOWN, FROM_BELOW = 30, 0.15, 2.5, 0.3, 0.15
+local STEP = 3  -- m/s: a hit still building gets more dent each time it's this much harder
 local crash = {}
 local function cross(ax, ay, az, bx, by, bz) return ay * bz - az * by, az * bx - ax * bz, ax * by - ay * bx end
 
@@ -780,26 +816,30 @@ end
 local crashQueue = {}
 
 -- A crash's dent: r (world) from the car's middle, pushed along dir (world).
-local function makeCrashDent(i, body, r, dir, speed, dvLen, along)
+local function crashDepth(speed) return (speed - MIN_HIT) * 0.025 * settings.crashScale + 0.01 end
+local function makeCrashDent(i, body, r, dir, speed, dvLen, along, from)
   local mn, mx = body.min, body.max
   local W = body.node:getWorldTransformationRaw()
   local centre = W:transformPoint(vec3((mn[1] + mx[1]) / 2, (mn[2] + mx[2]) / 2, (mn[3] + mx[3]) / 2))
   local aim = centre + r
   local hit = hitCar(body, aim - dir * 6, dir) or (aim - dir * 1.0)
-  local depth = math.min(settings.maxOffset, (speed - MIN_HIT) * 0.025 * settings.crashScale + 0.01)
-  trace('crash: car %d, %.1f m/s at the contact (%.1f at the middle), %.2f m from the middle (along %.2f): dent %.3f m',
-    i, speed, dvLen, r:length(), along, depth)
+  -- (a hit still building: only what it adds to its dent so far)
+  from = from or 0
+  local depth = math.min(settings.maxOffset, crashDepth(speed)) - (from > 0 and math.min(settings.maxOffset, crashDepth(from)) or 0)
+  if depth <= 0 then return end
+  trace('crash: car %d, %.1f m/s at the contact (%.1f at the middle), %.2f m from the middle (along %.2f): dent %.3f m%s',
+    i, speed, dvLen, r:length(), along, depth, from > 0 and (' more (was %.1f m/s)'):format(from) or '')
   dentWorld(body, hit, dir, depth, 0.35 + 0.025 * speed, speed / 12)
   body.lastCrash = speed
-  body.crashes = (body.crashes or 0) + 1
+  if from == 0 then body.crashes = (body.crashes or 0) + 1 end
 end
 
-local function crashDent(i, body, r, dir, speed, dvLen, along)
+local function crashDent(i, body, r, dir, speed, dvLen, along, from)
   -- in the car's frame now (it moves on while waiting): r and dir kept relative to the body
   local inv = body.node:getWorldTransformationRaw():inverse()
   if #crashQueue >= 32 then table.remove(crashQueue, 1) end
   crashQueue[#crashQueue + 1] = {i = i, body = body, r = inv:transformVector(r), dir = inv:transformVector(dir), speed = speed,
-    dvLen = dvLen, along = along}
+    dvLen = dvLen, along = along, from = from}
 end
 
 local function nextCrashDent()
@@ -807,7 +847,7 @@ local function nextCrashDent()
   if not q then return end
   if cars[q.i] ~= q.body or q.body.state ~= 'ready' then return end
   local W = q.body.node:getWorldTransformationRaw()
-  makeCrashDent(q.i, q.body, W:transformVector(q.r), W:transformVector(q.dir):normalize(), q.speed, q.dvLen, q.along)
+  makeCrashDent(q.i, q.body, W:transformVector(q.r), W:transformVector(q.dir):normalize(), q.speed, q.dvLen, q.along, q.from)
 end
 
 -- Crashes of cars not read yet: kept (in the car's own axes) until the car is, then dented.
@@ -819,6 +859,43 @@ local function carAxes(car)
 end
 
 local requestSetup  -- (below)
+
+-- Where and how hard the hit so far was (since the impact began): r (world) from the car's middle, rl the same
+-- in the car's own frame, the push's direction, the speed change at the contact point and at the middle; and the
+-- car's axes (for a car not read yet). r = k^2 (dv x dw) / |dv|^2, kept inside the car's box.
+local function crashHit(car, body, ready, c, wx, wy, wz, L, Wd, Hd)
+  local up = car.up
+  local dvx, dvy, dvz = c.maxDv.x, c.maxDv.y, c.maxDv.z
+  -- a push from below (along the car's up): mostly the suspension's
+  local vu = dvx * up.x + dvy * up.y + dvz * up.z
+  if vu > 0 then
+    local cut = vu * (1 - FROM_BELOW)
+    dvx, dvy, dvz = dvx - up.x * cut, dvy - up.y * cut, dvz - up.z * cut
+  end
+  local dv2 = dvx * dvx + dvy * dvy + dvz * dvz
+  if dv2 < 1e-6 then return nil end
+  local dwx, dwy, dwz = wx - c.wBefore[1], wy - c.wBefore[2], wz - c.wBefore[3]
+  local k2 = (L * L + Wd * Wd) / 12
+  local rx, ry, rz = cross(dvx, dvy, dvz, dwx, dwy, dwz)
+  rx, ry, rz = rx * k2 / dv2, ry * k2 / dv2, rz * k2 / dv2
+  local W, ax, ay, az, rl
+  if ready then
+    W = body.node:getWorldTransformationRaw()
+    rl = W:inverse():transformVector(vec3(rx, ry, rz))
+  else
+    ax, ay, az = carAxes(car)
+    rl = vec3(rx * ax.x + ry * ax.y + rz * ax.z, rx * ay.x + ry * ay.y + rz * ay.z, rx * az.x + ry * az.y + rz * az.z)
+  end
+  rl.x = math.max(-Wd / 2, math.min(Wd / 2, rl.x))
+  rl.y = math.max(-Hd / 2, math.min(Hd / 2, rl.y))
+  rl.z = math.max(-L / 2, math.min(L / 2, rl.z))
+  local r = ready and W:transformVector(rl) or (ax * rl.x + ay * rl.y + az * rl.z)
+  -- the change at the contact point: dv + dw x r (at most three times the middle's: noise in the spin)
+  local px, py, pz = cross(dwx, dwy, dwz, r.x, r.y, r.z)
+  local dvLen = math.sqrt(dv2)
+  local speed = math.min(dvLen * 3 + 1, math.sqrt((dvx + px) ^ 2 + (dvy + py) ^ 2 + (dvz + pz) ^ 2))
+  return r, rl, vec3(dvx, dvy, dvz):normalize(), speed, dvLen, ax, ay, az
+end
 
 local function updateCrash(i, dt)
   local car = ac.getCar(i)
@@ -849,7 +926,7 @@ local function updateCrash(i, dt)
   local jump = math.sqrt((vel.x - pv.x) ^ 2 + (vel.y - pv.y) ^ 2 + (vel.z - pv.z) ^ 2) / dt
   local spinJump = math.sqrt((wx - c.w[1]) ^ 2 + (wy - c.w[2]) ^ 2 + (wz - c.w[3]) ^ 2) / dt * halfLen
   if not c.at and not teleported and c.cool == 0 and (jump + spinJump > IMPACT_ACCEL or car.collisionDepth > 0) then
-    c.at, c.before, c.maxDv = 0, c.prevVel:clone(), vec3()
+    c.at, c.before, c.maxDv, c.dented = 0, c.prevVel:clone(), vec3(), 0
     c.wBefore = {c.w[1], c.w[2], c.w[3]}
   end
   if c.at then
@@ -857,67 +934,35 @@ local function updateCrash(i, dt)
     local b = c.before
     local ex, ey, ez = vel.x - b.x, vel.y - b.y, vel.z - b.z
     if ex * ex + ey * ey + ez * ez > c.maxDv:lengthSquared() then c.maxDv:set(ex, ey, ez) end
-    if c.at >= IMPACT_WINDOW then
-      c.at = nil
-      local up = car.up
-      local dvx, dvy, dvz = c.maxDv.x, c.maxDv.y, c.maxDv.z
-      -- a push from below (along the car's up): mostly the suspension's
-      local vu = dvx * up.x + dvy * up.y + dvz * up.z
-      if vu > 0 then
-        local cut = vu * (1 - FROM_BELOW)
-        dvx, dvy, dvz = dvx - up.x * cut, dvy - up.y * cut, dvz - up.z * cut
-      end
-      local dv2 = dvx * dvx + dvy * dvy + dvz * dvz
-      local dwx, dwy, dwz = wx - c.wBefore[1], wy - c.wBefore[2], wz - c.wBefore[3]
-      -- where: r = k^2 (dv x dw) / |dv|^2, kept inside the car's box (in its own frame: the body's once read,
-      -- the car's axes till then)
-      local k2 = (L * L + Wd * Wd) / 12
-      local rx, ry, rz = 0, 0, 0
-      if dv2 > 1e-6 then
-        rx, ry, rz = cross(dvx, dvy, dvz, dwx, dwy, dwz)
-        rx, ry, rz = rx * k2 / dv2, ry * k2 / dv2, rz * k2 / dv2
-      end
-      local W, inv, ax, ay, az
-      local rl
-      if ready then
-        W = body.node:getWorldTransformationRaw()
-        inv = W:inverse()
-        rl = inv:transformVector(vec3(rx, ry, rz))
-      else
-        ax, ay, az = carAxes(car)
-        rl = vec3(rx * ax.x + ry * ax.y + rz * ax.z, rx * ay.x + ry * ay.y + rz * ay.z, rx * az.x + ry * az.y + rz * az.z)
-      end
-      rl.x = math.max(-Wd / 2, math.min(Wd / 2, rl.x))
-      rl.y = math.max(-Hd / 2, math.min(Hd / 2, rl.y))
-      rl.z = math.max(-L / 2, math.min(L / 2, rl.z))
-      local r = ready and W:transformVector(rl) or (ax * rl.x + ay * rl.y + az * rl.z)
-      -- the change at the contact point: dv + dw x r (at most three times the middle's: noise in the spin)
-      local px, py, pz = cross(dwx, dwy, dwz, r.x, r.y, r.z)
-      local dvLen = math.sqrt(dv2)
-      local speed = math.min(dvLen * 3 + 1, math.sqrt((dvx + px) ^ 2 + (dvy + py) ^ 2 + (dvz + pz) ^ 2))
-      if speed > MIN_HIT and dvLen > 1e-3 then
-        c.cool = COOLDOWN
-        local dir = vec3(dvx, dvy, dvz):normalize()
+    -- dent as soon as the hit is clear, the first frame if it can be: then, if it keeps building over the window
+    -- (a hit lasting a few frames), the rest at once as it comes (STEP at a time). Cars not read yet: at the end
+    local done = c.at >= IMPACT_WINDOW
+    if ready or done then
+      local r, rl, dir, speed, dvLen, ax, ay, az = crashHit(car, body, ready, c, wx, wy, wz, L, Wd, Hd)
+      if speed and speed > MIN_HIT and dvLen > 1e-3 and speed >= c.dented + (c.dented > 0 and STEP or 0) then
         if ready then
-          crashDent(i, body, r, dir, speed, dvLen, rl.z)
-        else
+          crashDent(i, body, r, dir, speed, dvLen, rl.z, c.dented)
+        elseif i == sim.focusedCar or totalVertices() < settings.maxVertices then
           -- not read yet: kept in the car's axes, and the car read first of all
-          if i == sim.focusedCar or totalVertices() < settings.maxVertices then
-            local p = pending[i] or {}
-            pending[i] = p
-            if #p >= 3 then  -- the three hardest are enough
-              local weakest = 1
-              for k = 2, #p do if p[k].speed < p[weakest].speed then weakest = k end end
-              if p[weakest].speed < speed then table.remove(p, weakest) end
-            end
-            if #p < 3 then
-              p[#p + 1] = {r = {rl.x, rl.y, rl.z}, dir = {dir:dot(ax), dir:dot(ay), dir:dot(az)}, speed = speed, dvLen = dvLen}
-            end
-            trace('crash: car %d (not read yet), %.1f m/s: reading it to dent it', i, speed)
-            requestSetup(i, true)
+          local p = pending[i] or {}
+          pending[i] = p
+          if #p >= 3 then  -- the three hardest are enough
+            local weakest = 1
+            for k = 2, #p do if p[k].speed < p[weakest].speed then weakest = k end end
+            if p[weakest].speed < speed then table.remove(p, weakest) end
           end
+          if #p < 3 then
+            p[#p + 1] = {r = {rl.x, rl.y, rl.z}, dir = {dir:dot(ax), dir:dot(ay), dir:dot(az)}, speed = speed, dvLen = dvLen}
+          end
+          trace('crash: car %d (not read yet), %.1f m/s: reading it to dent it', i, speed)
+          requestSetup(i, true)
         end
+        c.dented = speed
       end
+    end
+    if done then
+      c.at = nil
+      if c.dented > 0 then c.cool = COOLDOWN end
     end
   end
   c.w[1], c.w[2], c.w[3] = wx, wy, wz
@@ -1119,7 +1164,7 @@ end
 local function testB(body)
   local mesh = smallestMesh(body)
   trace('test B: alterVertices on "%s" (%d vertices), unchanged', mesh.name, mesh.n)
-  mesh.ref:alterVertices(mesh.orig)
+  mesh.ref:alterVertices(mesh.work)
   trace('test B: done')
   return 'passed ("' .. mesh.name .. '")'
 end
@@ -1186,7 +1231,7 @@ local function testE(body)
 end
 local function undoLift()
   if not testLifted then return end
-  testLifted.mesh.ref:alterVertices(testLifted.mesh.orig)
+  testLifted.mesh.ref:alterVertices(testLifted.mesh.work)
   trace('test D/E undone')
   testLifted = nil
 end
@@ -1299,7 +1344,8 @@ function script.windowSettings(dt)
     slider('hullRing', 'Hull rings every %.2f m (rebuild)', 0.15, 0.8)
     slider('hullAround', 'Hull atoms around: %.0f (rebuild)', 6, 24, 1, true)
   end
-  slider('budgetMs', 'Work per frame: %.1f ms', 1, 16)
+  slider('instantMs', 'Work on a new dent, its first frame: %.0f ms', 2, 40)
+  slider('budgetMs', 'Work per frame after that: %.1f ms', 1, 16)
   if ui.checkbox('Read cars without the button', settings.readWatched) then settings.readWatched = not settings.readWatched end
   if ui.checkbox('Every car in the session (not just the one I\'m watching)', settings.allCars) then settings.allCars = not settings.allCars end
   if settings.allCars then

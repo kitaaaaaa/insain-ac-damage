@@ -385,7 +385,7 @@ check(body2 ~= body and body2.state == 'ready', 'rebuilt')
 check(moved(H.bodyMesh.vertices, orig) == 0 and moved(H.doorMesh.vertices, origDoor) == 0, 'rebuild starts from the undamaged model')
 local same = true
 for _, m in ipairs(body2.meshes) do if m.name == 'body' then for i = 0, m.n - 1 do
-  if math.abs(m.orig.raw[i].pos.z - orig.raw[i].pos.z) > 1e-9 then same = false end end end end
+  if math.abs(m.op[i * 6 + 2] - orig.raw[i].pos.z) > 1e-6 then same = false end end end end
 check(same, 'rebuild keeps the original vertices')
 for i, b in pairs(H.state.cars) do check(not b.error, 'no errors in the background work: ' .. tostring(b.error)) end
 check(not body.error, 'no errors in the first body either: ' .. tostring(body.error))

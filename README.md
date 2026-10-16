@@ -157,13 +157,25 @@ again.
 
 ## Performance
 
-Denting a detailed car means moving tens of thousands of points, so the app spreads the work over frames: up to
-4 ms a frame on dents (setting: **Work per frame**), then up to 2 ms on reading cars. In practice:
+Denting a detailed car means moving tens of thousands of points. To make dents appear the moment a car is hit:
 
-- A dent appears a few frames after the crash, not at once. Lowering **Work per frame** makes each frame lighter
-  and dents slower to appear.
-- **Reading** a car takes a second or two of background work, longer for very detailed cars. That's why the app
-  reads nearby cars ahead of time: so crashes don't wait for it.
+- The app **dents on the first frame of the impact**, and if the hit keeps building over the next few frames,
+  adds the rest as it comes.
+- It works **outwards from the impact**: the middle of the dent first, then its edges. On the frame a dent
+  happens it gets up to 12 ms of work (setting: **Work on a new dent, its first frame**), which is enough for
+  most of it; whatever is left is done in the next frames (**Work per frame after that**, 4 ms), and each frame's
+  progress is shown straight away.
+- Everything a dent needs is prepared when the car is read (a copy of its model, the crumple pattern), so
+  nothing has to be fetched at the moment of a crash.
+
+So a big hit can cost one heavier frame. If you'd rather never have that, lower **Work on a new dent**: dents
+then build up over a few frames instead.
+
+Reading cars is the slow part, and it happens ahead of time, in the background:
+
+- **Reading** a car takes a second or two of background work (up to 2 ms a frame), longer for very detailed
+  cars. That's why the app reads nearby cars before they crash. A car that crashes before it's been read is read
+  then, and dented as soon as that's done.
 - **Memory**: each car read takes very roughly 15–30 MB. The app stops reading more cars at 1 million vertices
   in all (a setting), nearest cars first; the car you're watching is always read. When memory runs short, it
   lets go of far away cars that aren't damaged.
