@@ -271,6 +271,6 @@ return function(opts)
     H.state = __softdamageTest
   end
   function H.frame(dt) script.update(dt or 1 / 60) script.windowMain(dt or 1 / 60) script.windowSettings(dt or 1 / 60) end
-  function H.settle(max) for _ = 1, max or 2000 do H.frame() if #H.state.jobs == 0 then return true end end return false end
+  function H.settle(max) for _ = 1, max or 2000 do H.frame() if #H.state.jobs == 0 and not H.state.busy() then return true end end return false end
   return H
 end

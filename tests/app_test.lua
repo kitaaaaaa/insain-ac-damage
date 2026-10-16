@@ -204,6 +204,38 @@ do
   H.storage.crunch = c0
 end
 
+-- bending: a dent eases in over bendTime (0.3 s here, 18 frames), growing every frame, and ends exactly where
+-- it would without bending
+do
+  local c0, b0 = H.storage.crunch, H.storage.bendTime
+  H.storage.crunch = 0
+  press('Repair')
+  H.storage.bendTime = 0
+  local W = H.bodyWorld
+  H.state.dentWorld(body, W:transformPoint(vec3(0, 0.6, 2.2)), W:transformVector(vec3(0, 0, -1)), 0.2, 0.6)
+  H.settle()
+  local instant = snapshot(H.bodyMesh.vertices)
+  press('Repair')
+  H.storage.bendTime = 0.3
+  H.state.dentWorld(body, W:transformPoint(vec3(0, 0.6, 2.2)), W:transformVector(vec3(0, 0, -1)), 0.2, 0.6)
+  local depths, grew = {}, true
+  for f = 1, 40 do
+    H.frame()
+    local _, d = moved(H.bodyMesh.vertices, orig)
+    depths[f] = d
+    if f > 1 and d < depths[f - 1] - 1e-6 then grew = false end
+  end
+  H.settle()
+  local final = depths[40]
+  check(depths[3] > 0.05 * final and depths[3] < 0.6 * final and depths[12] < 0.999 * final, ('it bends in: %.0f%% at 3 frames, %.0f%% at 12'):format(depths[3] / final * 100, depths[12] / final * 100))
+  check(grew, 'growing every frame, never back')
+  local d = diff(instant, snapshot(H.bodyMesh.vertices))
+  check(d < 1e-5, ('and ends where it would at once: off by %.6f m'):format(d))
+  press('Repair')
+  check(moved(H.bodyMesh.vertices, orig) == 0, 'a repair is at once')
+  H.storage.crunch, H.storage.bendTime = c0, b0
+end
+
 -- left: the +x side
 press('Repair')
 check(moved(H.bodyMesh.vertices, orig) == 0, 'repair: back exactly')

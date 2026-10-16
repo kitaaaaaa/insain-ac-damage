@@ -51,6 +51,7 @@ local settings = ac.storage{
   outsideBody = true,  -- also dent the car's meshes outside BODYTR (lights, glass, trim), unless on moving parts
   crashDents = true,   -- dents from crashes
   crashScale = 1,
+  bendTime = 0.3,      -- seconds the metal takes to bend in (0: at once)
   instantMs = 12,      -- work on a new dent the frame it happens (most of it shows at once)
   budgetMs = 4,        -- work per frame on dents (re-skinning) after that, first
   setupBudgetMs = 2,   -- then on reading cars
@@ -101,7 +102,7 @@ local function runPhase(setup, ms)
       local ok, err = coroutine.resume(j.co, t0)
       if not ok then log(j.name .. ': ' .. tostring(err)) j.body.error = tostring(err) table.remove(jobs, k)
       elseif coroutine.status(j.co) == 'dead' then table.remove(jobs, k)
-      else break end  -- (it yielded: the budget's used)
+      else k = k + 1 end  -- (it yielded: its turn's over; the next, if there's time)
     end
   end
 end
@@ -493,6 +494,90 @@ local function putBack(mesh, v)
   r.normal.x, r.normal.y, r.normal.z = op[k + 3], op[k + 4], op[k + 5]
 end
 
+-- Bending: a vertex isn't put where a dent moves it at once; it eases there over settings.bendTime (game
+-- time), fast at first and settling (ease-out), so the metal is seen giving way. Each vertex from wherever it
+-- is shown now, so a hit landing mid-bend carries on smoothly. The work per frame is a blend per bending vertex
+-- (the dent itself, where each vertex ends up, is worked out once).
+local animClock, frameDt = 0, 1 / 60
+local animating = {}  -- meshes with vertices on their way
+local function animArrays(mesh)
+  local n = mesh.n
+  mesh.af, mesh.at = arrays.floats(n * 6), arrays.floats(n * 6)  -- from, and the change: position and normal
+  mesh.as, mesh.aon, mesh.alist, mesh.an = arrays.floats(n), arrays.bytes(n), arrays.ints(n), 0
+end
+local function stopBending(mesh)
+  if mesh.aon and mesh.an > 0 then
+    for i = 0, mesh.an - 1 do mesh.aon[mesh.alist[i]] = 0 end
+    mesh.an = 0
+  end
+  animating[mesh] = nil
+end
+-- A vertex's new place (mesh space): shown at once (bend 0), or eased to.
+local function show(bendTime, mesh, v, x, y, z, nx, ny, nz)
+  local r = mesh.work.raw[v]
+  if bendTime <= 0 then
+    if mesh.aon and mesh.aon[v] == 1 then  -- (if bending: there now, at the next step)
+      local k, af = v * 6, mesh.af
+      af[k], af[k + 1], af[k + 2], af[k + 3], af[k + 4], af[k + 5] = x, y, z, nx, ny, nz
+      mesh.at[k], mesh.at[k + 1], mesh.at[k + 2], mesh.at[k + 3], mesh.at[k + 4], mesh.at[k + 5] = 0, 0, 0, 0, 0, 0
+      mesh.as[v] = -1e9
+    end
+    r.pos.x, r.pos.y, r.pos.z, r.normal.x, r.normal.y, r.normal.z = x, y, z, nx, ny, nz
+    return
+  end
+  local px, py, pz = r.pos.x, r.pos.y, r.pos.z
+  if (x - px) ^ 2 + (y - py) ^ 2 + (z - pz) ^ 2 < 0.001 ^ 2 and not (mesh.aon and mesh.aon[v] == 1) then
+    r.pos.x, r.pos.y, r.pos.z, r.normal.x, r.normal.y, r.normal.z = x, y, z, nx, ny, nz  -- (under a mm: at once)
+    return
+  end
+  if not mesh.af then animArrays(mesh) end
+  local k = v * 6
+  local af, at = mesh.af, mesh.at  -- from, and the change (to - from)
+  af[k], af[k + 1], af[k + 2], af[k + 3], af[k + 4], af[k + 5] = px, py, pz, r.normal.x, r.normal.y, r.normal.z
+  at[k], at[k + 1], at[k + 2] = x - px, y - py, z - pz
+  at[k + 3], at[k + 4], at[k + 5] = nx - af[k + 3], ny - af[k + 4], nz - af[k + 5]
+  mesh.as[v] = animClock
+  if mesh.aon[v] == 0 then
+    mesh.aon[v] = 1
+    mesh.alist[mesh.an] = v
+    mesh.an = mesh.an + 1
+  end
+  animating[mesh] = true
+end
+-- Moves every bending vertex on to where it is now in its bend; returns the meshes that changed.
+local function bendStep()
+  local T = math.max(1e-3, settings.bendTime)
+  local changed = {}
+  for mesh in pairs(animating) do
+    if mesh.moving then stopBending(mesh) else
+      local raw, af, at, as, aon, alist = mesh.work.raw, mesh.af, mesh.at, mesh.as, mesh.aon, mesh.alist
+      local i = 0
+      while i < mesh.an do
+        local v = alist[i]
+        local f = (animClock - as[v]) / T
+        local k, r = v * 6, raw[v]
+        if f >= 1 then
+          r.pos.x, r.pos.y, r.pos.z = af[k] + at[k], af[k + 1] + at[k + 1], af[k + 2] + at[k + 2]
+          r.normal.x, r.normal.y, r.normal.z = af[k + 3] + at[k + 3], af[k + 4] + at[k + 4], af[k + 5] + at[k + 5]
+          aon[v] = 0
+          mesh.an = mesh.an - 1
+          alist[i] = alist[mesh.an]
+        else
+          local g = 1 - f
+          local e = 1 - g * g * g  -- ease-out: fast at first, settling
+          r.pos.x, r.pos.y, r.pos.z = af[k] + at[k] * e, af[k + 1] + at[k + 1] * e, af[k + 2] + at[k + 2] * e
+          -- (the normal blended: a touch short of unit length mid-bend; the shading normalises it)
+          r.normal.x, r.normal.y, r.normal.z = af[k + 3] + at[k + 3] * e, af[k + 4] + at[k + 4] * e, af[k + 5] + at[k + 5] * e
+          i = i + 1
+        end
+      end
+      changed[#changed + 1] = mesh
+      if mesh.an == 0 then animating[mesh] = nil end
+    end
+  end
+  return changed
+end
+
 -- Shows a mesh's new vertices. 'direct': the car's own mesh takes them. 'copy': at its first dent, a copy of the
 -- mesh is made under the same node with the same material and the original hidden; the copy takes them.
 local function send(mesh)
@@ -543,8 +628,9 @@ local function crunchVertex(ctx, mesh, v, ox, oy, oz, qx, qy, qz, crunch, limit)
   -- normal, round parts (tubes, bars) went in and out all round, and looked swollen
   local d = crunch * cache[n4]
   local ol = math.sqrt(ox * ox + oy * oy + oz * oz)
-  local ux, uy, uz = nx0, ny0, nz0
-  if ol > 0.005 then ux, uy, uz = ox / ol, oy / ol, oz / ol end
+  local w = math.min(1, ol * 200)  -- (blends to the normal below 5 mm; no branch: LuaJIT compiles it)
+  local io = w / math.max(ol, 1e-9)
+  local ux, uy, uz = nx0 * (1 - w) + ox * io, ny0 * (1 - w) + oy * io, nz0 * (1 - w) + oz * io
   ox, oy, oz = ox + ux * d, oy + uy * d, oz + uz * d
   -- the crunch doesn't take it past its limit either
   local l2 = ox * ox + oy * oy + oz * oz
@@ -572,7 +658,8 @@ local function skinVertex(ctx, mesh, v)
   end
   if not ox then
     if mesh.moved[v] == 1 then  -- back as it was
-      putBack(mesh, v)
+      local op = mesh.op
+      show(ctx.bend, mesh, v, op[k6], op[k6 + 1], op[k6 + 2], op[k6 + 3], op[k6 + 4], op[k6 + 5])
       mesh.moved[v] = 0
       mesh.movedCount = (mesh.movedCount or 1) - 1
       return true
@@ -631,13 +718,11 @@ local function skinVertex(ctx, mesh, v)
   end
   -- the offset and normal into the mesh's own space
   local T = mesh.toMesh
-  local r = raw[v]
-  r.pos.x = op[k6] + T[1] * ox + T[4] * oy + T[7] * oz
-  r.pos.y = op[k6 + 1] + T[2] * ox + T[5] * oy + T[8] * oz
-  r.pos.z = op[k6 + 2] + T[3] * ox + T[6] * oy + T[9] * oz
   local mx, my, mz = T[1] * qx + T[4] * qy + T[7] * qz, T[2] * qx + T[5] * qy + T[8] * qz, T[3] * qx + T[6] * qy + T[9] * qz
   local ml = math.sqrt(mx * mx + my * my + mz * mz)
-  if ml > 0 then r.normal.x, r.normal.y, r.normal.z = mx / ml, my / ml, mz / ml end
+  if ml < 1e-9 then ml = 1 end
+  show(ctx.bend, mesh, v, op[k6] + T[1] * ox + T[4] * oy + T[7] * oz, op[k6 + 1] + T[2] * ox + T[5] * oy + T[8] * oz,
+    op[k6 + 2] + T[3] * ox + T[6] * oy + T[9] * oz, mx / ml, my / ml, mz / ml)
   if mesh.moved[v] == 0 then mesh.movedCount = (mesh.movedCount or 0) + 1 end
   mesh.moved[v] = 1
   return true
@@ -671,6 +756,7 @@ local function skin(body)
             if mesh.work then  -- all of it back as it was
               for v = 0, mesh.n - 1 do if mesh.moved[v] == 1 then putBack(mesh, v) end end
               arrays.zero(mesh.moved, mesh.n)
+              stopBending(mesh)
               mesh.movedCount = 0
               changed[mesh] = true
             end
@@ -688,6 +774,7 @@ local function skin(body)
       local ctx = {isHull = isHull, l = l, share = settings.interiorShare, interiorBlocks = settings.interiorBlocks,
         maxBody = settings.maxBodyIn >= 2.99 and 1e9 or settings.maxBodyIn,
         maxInterior = settings.maxInteriorIn, maxCrunch = settings.maxCrunch, crunchFn = crunchFn,
+        bend = body.instantNext and 0 or settings.bendTime,
         cf = 1 / settings.crunchSize, no = body.noiseOffset, noiseVer = body.noiseVer, wheels = body.wheels}
       -- nearest the dent first: what's there shows in the first frame, the edges after
       local keys = {}
@@ -752,6 +839,7 @@ local function skin(body)
       body.lastSkinMs, body.lastSkinSpan, body.lastSkinCount = work, nowMs() - started, count
     until not body.skinAgain
     body.skinning = false
+    body.instantNext = nil
   end)
   jobs[#jobs + 1] = {co = co, name = 'skin car ' .. body.index, body = body}
 end
@@ -769,6 +857,7 @@ local function restoreNow(body)
     end
     if mesh.sent and not mesh.moving then mesh.ref:alterVertices(mesh.work) end
     arrays.zero(mesh.moved, mesh.n)
+    stopBending(mesh)
     mesh.sent, mesh.movedCount = nil, 0
   end
 end
@@ -779,6 +868,8 @@ local function repair(body)
   if not body or not body.atoms then return end
   if body.kind == 'hull' then hull.reset(body.atoms) else lattice.reset(body.atoms) end
   body.dents = 0
+  for _, mesh in ipairs(body.meshes) do stopBending(mesh) end
+  body.instantNext = true  -- (a repair is at once)
   skin(body)
 end
 
@@ -1165,6 +1256,8 @@ end
 
 function script.update(dt)
   local tStart = nowMs()
+  frameDt = math.max(0, math.min(dt or 0, 0.1))
+  if not sim.isPaused then animClock = animClock + frameDt end
   local i = sim.focusedCar
   if settings.readWatched then manageCars() end
   -- Ctrl + left click on the car: a dent there, along the view
@@ -1195,6 +1288,7 @@ function script.update(dt)
   applyPending()
   nextCrashDent()
   runJobs()
+  for _, mesh in ipairs(bendStep()) do sendQueue[#sendQueue + 1] = mesh end
   sendQueued()
   local tEnd = nowMs()
   -- (smoothed) how long the app takes a frame: all of it, the crash watching, the background work
@@ -1420,6 +1514,7 @@ function script.windowSettings(dt)
     slider('hullRing', 'Hull rings every %.2f m (rebuild)', 0.15, 0.8)
     slider('hullAround', 'Hull atoms around: %.0f (rebuild)', 6, 24, 1, true)
   end
+  slider('bendTime', settings.bendTime < 0.01 and 'Metal bends in: at once' or 'Metal bends in over %.2f s', 0, 1)
   slider('instantMs', 'Work on a new dent, its first frame: %.0f ms', 2, 40)
   slider('budgetMs', 'Work per frame after that: %.1f ms', 1, 16)
   if ui.checkbox('Read cars without the button', settings.readWatched) then settings.readWatched = not settings.readWatched end
@@ -1454,4 +1549,4 @@ function script.windowSettings(dt)
   end
 end
 
-if __softdamageTest then __softdamageTest.cars = cars __softdamageTest.jobs = jobs __softdamageTest.dentWorld = dentWorld end
+if __softdamageTest then __softdamageTest.busy = function() return next(animating) ~= nil end __softdamageTest.cars = cars __softdamageTest.jobs = jobs __softdamageTest.dentWorld = dentWorld end

@@ -89,8 +89,9 @@ fading out around it. Then:
   as far off its triangle of atoms as it was. (1nsane scaled that distance with the triangle's size, so tubes
   swelled where the hull stretched.)
 
-Then every vertex pinned to a moved triangle moves with it, and the changed parts of the model go back to AC to
-be drawn.
+Then every vertex pinned to a moved triangle is given its new place, and **bends** there: rather than
+jumping, the metal eases in over about a third of a second, fast at first and settling, so you see it give way.
+A second hit while it's still moving carries on from wherever it's got to.
 
 ### Not every part dents the same
 
@@ -143,6 +144,7 @@ Open them with the gear icon on the app's window. The useful ones:
 | The body crumples against the interior, not through it | On: the body stops at the cockpit and crumples there. |
 | Crunch (in the main window), Crunch: biggest creases, Crunch: at most | How crumpled dented metal looks, how big the creases are, and how deep they can go. At 0% crunch, dents are smooth. |
 | Crunch style | **Creases** (sharp folds, like crumpled sheet metal) or **Hammered** (round bumps). |
+| Metal bends in over … s | How long a dent takes to bend in. 0: at once. |
 | Spring passes | How far a dent spreads into the panel around it. |
 | Spring limits; Metal stretches, Squashes, Folds | How much the metal between atoms may stretch or squash, and when it folds. |
 
@@ -168,19 +170,17 @@ again.
 
 ## Performance
 
-Denting a detailed car means moving tens of thousands of points. To make dents appear the moment a car is hit:
+Denting a detailed car means moving tens of thousands of points. How the work is spread:
 
-- The app **dents on the first frame of the impact**, and if the hit keeps building over the next few frames,
-  adds the rest as it comes.
-- It works **outwards from the impact**: the middle of the dent first, then its edges. On the frame a dent
-  happens it gets up to 12 ms of work (setting: **Work on a new dent, its first frame**), which is enough for
-  most of it; whatever is left is done in the next frames (**Work per frame after that**, 4 ms), and each frame's
-  progress is shown straight away.
+- When a car is hit, the app works out where every point of the dent ends up, the middle of the dent first,
+  with up to 12 ms of work on the frame it happens (setting: **Work on a new dent, its first frame**) and up to
+  4 ms on each frame after (**Work per frame after that**).
+- Then the metal **bends** in over about 0.3 s (**Metal bends in over**): each frame, every point that's still
+  moving goes a step further. That part is light: a blend per moving point.
 - Everything a dent needs is prepared when the car is read (a copy of its model, the crumple pattern), so
   nothing has to be fetched at the moment of a crash.
 
-So a big hit can cost one heavier frame. If you'd rather never have that, lower **Work on a new dent**: dents
-then build up over a few frames instead.
+Set **Metal bends in over** to 0 for dents that appear in one go instead.
 
 Reading cars is the slow part, and it happens ahead of time, in the background:
 
