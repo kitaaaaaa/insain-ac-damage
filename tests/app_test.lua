@@ -20,7 +20,12 @@ if f then f:close() end
 check(traceText:find('app loaded', 1, true) and traceText:find('mesh %d+/%d+: read'), 'trace written')
 local body = H.state.cars[0]
 check(body and body.state == 'ready', 'ready: ' .. tostring(body and body.state))
-check(body.vertices == orig.n + 3 + H.cardMesh.vertices.n and #body.meshes == 3, 'body, panel and interior read: ' .. body.vertices)
+check(body.vertices == orig.n + 3 + H.cardMesh.vertices.n + H.lensMesh.vertices.n and #body.meshes == 4, 'body, panel, interior and the lens outside BODYTR read: ' .. body.vertices)
+local partStatus = {}
+for _, part in ipairs(body.parts) do partStatus[part.name] = part.status end
+check(partStatus.headlight_glass and partStatus.headlight_glass:find('outside BODYTR, body', 1, true), 'the lens: ' .. tostring(partStatus.headlight_glass))
+check(partStatus.tyre_lf and partStatus.tyre_lf:find('on a moving part', 1, true), 'the wheel left alone: ' .. tostring(partStatus.tyre_lf))
+check(partStatus['DRIVER:suit'] and partStatus['DRIVER:suit']:find('left still', 1, true), 'the driver listed: ' .. tostring(partStatus['DRIVER:suit']))
 check(body.skipped == 3, 'driver, needle and steering wheel left still: ' .. tostring(body.skipped))
 local card
 for _, m in ipairs(body.meshes) do if m.name == 'door_card' then card = m end end
@@ -72,6 +77,7 @@ for i = 0, orig.n - 1 do
 end
 check(bent, 'normals bent')
 check(H.altered.body and H.altered.body >= 1, 'body mesh sent')
+check(H.altered.headlight_glass and H.altered.headlight_glass >= 1, 'the headlight lens (outside BODYTR) dented with the front')
 
 H.storage.crunch = 1
 -- crunch: the same dent with crunch is rough (vertices off the smooth dent, normals tilted); harder is rougher
@@ -141,6 +147,25 @@ check(worstCard <= H.storage.maxInteriorIn + 1e-5 and worstCard > 0.01, ('the in
 check(moved(H.steerMesh.vertices, origSteer) == 0, 'the steering wheel never moves')
 H.storage.depth, H.storage.radius = 0.12, 0.45
 
+-- pushed sideways, the rear quarter gives more than the door (the same push, smooth)
+do
+  local crunch0, springs0 = H.storage.crunch, H.storage.springs
+  H.storage.crunch, H.storage.springs = 0, 0
+  local W = H.bodyWorld
+  local function sideDent(z)
+    press('Repair')
+    H.state.dentWorld(body, W:transformPoint(vec3(0.9, 0.6, z)), W:transformVector(vec3(-1, 0, 0)), 0.1, 0.45)
+    H.settle()
+    local l, most = body.atoms, 0
+    for i = 0, l.count - 1 do most = math.max(most, math.sqrt(l.dx[i] ^ 2 + l.dy[i] ^ 2 + l.dz[i] ^ 2)) end
+    return most
+  end
+  local door, quarter = sideDent(0), sideDent(-1.9)
+  check(quarter > door * 1.8, ('sideways: the rear quarter gives more than the door (%.3f vs %.3f m)'):format(quarter, door))
+  press('Repair')
+  H.storage.crunch, H.storage.springs = crunch0, springs0
+end
+
 -- left: the +x side
 press('Repair')
 check(moved(H.bodyMesh.vertices, orig) == 0, 'repair: back exactly')
@@ -162,6 +187,21 @@ check(body.dents == dents + 1 and n > 0, 'Ctrl+click: a dent at the back: ' .. n
 H.jumps[0](0)
 H.settle()
 check(moved(H.bodyMesh.vertices, orig) == 0, 'reset repairs')
+
+-- a part outside BODYTR that turns out to move on the body (its node moves): put back, and not dented again
+press('Repair')
+H.storage.crunch = 0
+local lensBefore = H.lensMesh.vertices:copy()
+press('front')
+check(moved(H.lensMesh.vertices, lensBefore) > 0, 'the lens dents')
+H.lightsNode.world = H.compose(H.bodyWorld, H.rotY(0, 0, 0.2, 0))  -- lifted 20 cm on the body
+press('back')
+check(moved(H.lensMesh.vertices, lensBefore) == 0, 'a part that moves on the body: put back')
+press('front')
+check(moved(H.lensMesh.vertices, lensBefore) == 0, 'and not dented again')
+H.lightsNode.world = H.bodyWorld
+press('Repair')
+H.storage.crunch = 1
 
 -- crashes (on by default). The car drives forward (+z in its frame)
 H.storage.crunch = 1

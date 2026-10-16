@@ -121,6 +121,16 @@ return function(opts)
   local steer = node('STEER_HR', H.bodyWorld, body)
   H.steerMesh = {name = 'steering_wheel', parent = steer, vertices = buffer({{0.4, 0.8, 0.6, 0, 0, -1}, {0.3, 0.8, 0.6, 0, 0, -1}, {0.35, 0.9, 0.6, 0, 0, -1}})}
   steer.meshes = {H.steerMesh}
+  -- outside BODYTR, as some cars have them: a headlight lens on a node of its own (fixed to the body), and a
+  -- wheel (moves on its own: left alone)
+  H.lightsNode = node('LIGHTS', H.bodyWorld, root)
+  local lens = {}
+  for a = 0, 4 do for b = 0, 4 do lens[#lens + 1] = {0.4 + a * 0.05, 0.6 + b * 0.05, 2.19, 0, 0, 1} end end
+  H.lensMesh = {name = 'headlight_glass', parent = H.lightsNode, vertices = buffer(lens)}
+  H.lightsNode.meshes = {H.lensMesh}
+  local wheel = node('WHEEL_LF', H.compose(H.bodyWorld, H.rotY(0, 0.8, 0.3, 1.4)), root)
+  H.wheelMesh = {name = 'tyre_lf', parent = wheel, vertices = buffer({{0, 0, 0, 1, 0, 0}, {0, 0.1, 0, 1, 0, 0}, {0, 0, 0.1, 1, 0, 0}})}
+  wheel.meshes = {H.wheelMesh}
   local track = node('trackRoot:yes', H.rotY(0))
   H.trackMesh = {name = 'road', parent = track, vertices = buffer({{0, 0, 0, 0, 1, 0}, {1, 0, 0, 0, 1, 0}, {0, 0, 1, 0, 1, 0}})}
   track.meshes = {H.trackMesh}

@@ -6,6 +6,16 @@ vertex of the body is pinned to the hull's triangles and follows them. 1nsane's 
 by hand; here the hull is built from the car's own meshes. Visual only: AC's physics and collisions don't
 change.
 
+## New in 0.5.1
+
+- **More of the car dents**: meshes outside BODYTR are read too (see How it works), so lights and glass some
+  cars keep there dent with the body. A setting turns it off.
+- **Show the parts** (a box in the window): every mesh of the car and what became of it: body, interior (and
+  how much it moves), left still (and why), outside BODYTR, on a moving part, no vertices, and how many of its
+  vertices are moved now. If a part doesn't dent, this says why (the trace file has it too).
+- **The quarters give more sideways**: a tail swinging into a wall crumples the rear corner (see Which way,
+  how far).
+
 ## New in 0.5.0: the car-shaped hull
 
 Until 0.4.0 the atoms were a box lattice over the car (atoms in the air around it and inside it). Now they're a
@@ -62,7 +72,9 @@ if AC crashes, the file's last line shows where.
 ## Which way, how far
 
 - **Each way gives differently**: a dent's depth is scaled by the way the car was pushed, in its own frame:
-  the front 150% (a crumple zone), the rear 120%, the roof 80%, the sides 60% (door beams). Sliders.
+  the front 150% (a crumple zone), the rear 120%, the roof 80%, and pushed sideways, the doors 60% (beams in
+  them) rising to 130% at the front and rear quarters (crumple zones: a tail into a wall bends the corner).
+  Sliders.
 - **The interior** (the cockpit: AC's `COCKPIT_HR` / `COCKPIT_LR` nodes) moves with the body, half as much.
   The driver, the steering wheel and gauge needles don't move at all.
 - **Limits**: a spot of the body moves at most half a foot (0.15 m), a spot of the interior a quarter foot
@@ -105,8 +117,10 @@ mesh's vertices comes from `getVertices()` again.
 
 ## How it works
 
-- The meshes under the car's `BODYTR` node (the car's body, not its wheels and suspension) are read once
-  (`getVertices`). Each vertex is put in the body's own coordinates through its node's transform.
+- The meshes under the car's `BODYTR` node are read once (`getVertices`), and the car's other meshes too
+  (lights, glass, trim some cars keep outside BODYTR), except those on moving parts (by their names: wheels,
+  tyres, rims, hubs, discs, calipers, suspension, steering, wipers, the driver, shadows, blur). If one of those
+  others moves on the body after all (its node moves), it's put back and not dented again (the trace says so). Each vertex is put in the body's own coordinates through its node's transform.
 - The hull is built around them and each vertex pinned to it (see above); or, with the box lattice, atoms
   every 0.35 m over the body's box.
 - A dent pushes the atoms near it (at least the nearest) along the hit, by up to the depth asked with a smooth

@@ -23,7 +23,8 @@ local settings = ac.storage{
   interiorShare = 0.5, -- the interior moves this much of what the body around it does
   frontGive = 1.5,     -- how much each way gives: the front (a crumple zone) most, the sides (door beams) least
   rearGive = 1.2,
-  sideGive = 0.6,
+  sideGive = 0.6,      -- (the doors: beams in them; the sides ramp up to endGive towards the ends)
+  endGive = 1.3,       -- the front and rear quarters, pushed sideways: crumple zones, no door beams
   roofGive = 0.8,
   crunch = 1,          -- crunchy damage: noise on dented metal, more the harder the hit (0 = smooth dents)
   crunchSize = 0.25,   -- metres: the size of the biggest creases (finer ones on top)
@@ -32,6 +33,7 @@ local settings = ac.storage{
   readWatched = true,  -- read the car being watched without pressing the button
   method = 'direct',   -- how dents are shown: 'direct' (the car's own meshes changed) or 'copy' (our own copies
                        -- of the meshes, the originals hidden: createMesh crashed AC in test C)
+  outsideBody = true,  -- also dent the car's meshes outside BODYTR (lights, glass, trim), unless on moving parts
   crashDents = true,   -- dents from crashes
   crashScale = 1,
   budgetMs = 4,        -- work per frame (setup and re-skinning)
@@ -92,6 +94,25 @@ local function partKind(ref, meshName)
   return nil
 end
 
+-- Parts outside BODYTR that move on their own (by their nodes' names): not dented. Anything else outside it
+-- (lights, glass, trim some cars keep there) is read with the body.
+local MOVING = {'WHEEL', 'SUSP', 'HUB', 'DISC', 'RIM', 'TYRE', 'TIRE', 'CALIPER', 'BRAKE', 'DAMPER', 'SHOCK',
+  'SPRING', 'AXLE', 'ARM', 'STEER', 'DRIVER', 'WIPER', 'SHADOW', 'BLUR'}
+local function movingPart(ref, meshName)
+  local names = {meshName}
+  local node = ref:getParent()
+  for _ = 1, 12 do
+    if node:size() == 0 then break end
+    names[#names + 1] = node:name()
+    node = node:getParent()
+  end
+  for _, n in ipairs(names) do
+    local up = n:upper()
+    for _, m in ipairs(MOVING) do if up:find(m, 1, true) then return n end end
+  end
+  return nil
+end
+
 -- Reads the body meshes of car i: their vertices in the body's own coordinates (BODYTR space), once.
 local function setupCar(i)
   local body = {index = i, meshes = {}, vertices = 0, state = 'reading meshes', setupMs = 0, lastSkinMs = 0, dents = 0}
@@ -108,23 +129,55 @@ local function setupCar(i)
     local bodyWorld = bodyNode:getWorldTransformationRaw():clone()
     local invBody = bodyWorld:inverse()
     trace('car %d: body transform read; finding meshes', i)
+    -- the meshes to read: everything under BODYTR, and (a setting) the car's other meshes that aren't on moving
+    -- parts. body.parts says what became of each, for the window
+    local list, under = {}, {}
+    body.parts = {}
     local meshes = bodyNode:findMeshes('?')
-    body.meshCount = meshes:size()
-    trace('car %d: %d meshes', i, body.meshCount)
-    local min, max = {1e9, 1e9, 1e9}, {-1e9, -1e9, -1e9}
     for m = 1, meshes:size() do
-      local ref = meshes:at(m)
-      local name = meshes:name(m)
+      list[#list + 1] = {ref = meshes:at(m), name = meshes:name(m)}
+      under[meshes:name(m)] = true
+    end
+    trace('car %d: %d meshes under BODYTR', i, #list)
+    if settings.outsideBody then
+      local all = root:findMeshes('?')
+      for m = 1, all:size() do
+        local name = all:name(m)
+        if not under[name] then
+          local ref = all:at(m)
+          local moving = movingPart(ref, name)
+          if moving then
+            body.parts[#body.parts + 1] = {name = name, status = 'outside BODYTR, on a moving part (' .. moving .. '): left alone'}
+            trace('mesh "%s": outside BODYTR, on a moving part (%s): left alone', name, moving)
+          else
+            list[#list + 1] = {ref = ref, name = name, outside = true}
+          end
+        end
+      end
+      trace('car %d: %d meshes in all', i, #list)
+    end
+    body.meshCount = #list
+    local min, max = {1e9, 1e9, 1e9}, {-1e9, -1e9, -1e9}
+    for m, item in ipairs(list) do
+      local ref, name = item.ref, item.name
       body.reading = ('%d/%d %s'):format(m, body.meshCount, name)
       local kind, because = partKind(ref, name)
       local skip = kind == 'skip' and because
-      if skip then trace('mesh %d/%d "%s": skipped (%s)', m, body.meshCount, name, skip) body.skipped = (body.skipped or 0) + 1 end
-      if not skip then trace('mesh %d/%d "%s": getVertices', m, body.meshCount, name) end
+      local where = item.outside and 'outside BODYTR, ' or ''
+      local status
+      if skip then
+        trace('mesh %d/%d "%s": skipped (%s)', m, body.meshCount, name, skip) body.skipped = (body.skipped or 0) + 1
+        status = where .. 'left still (' .. skip .. ')'
+      end
+      if not skip then trace('mesh %d/%d "%s"%s: getVertices', m, body.meshCount, name, item.outside and ' (outside BODYTR)' or '') end
       local verts = not skip and ref:getVertices() or nil
       if not skip then
       trace('mesh %d/%d: %s', m, body.meshCount, verts and (verts:size() .. ' vertices') or 'no vertices')
+      if not verts or verts:size() == 0 then status = where .. 'no vertices (getVertices gave none)'
+      elseif ref:isPhysicsOnlyMesh() then status = where .. 'physics only (not drawn)' end
       if verts and verts:size() > 0 and not ref:isPhysicsOnlyMesh() then
-        local parentWorld = ref:getParent():getWorldTransformationRaw():clone()
+        local parentNode = ref:getParent()
+        local parentWorld = parentNode:getWorldTransformationRaw():clone()
         local invParent = parentWorld:inverse()
         -- mesh -> body: origin and the images of the unit vectors; body -> mesh for offsets and normals
         local function toBody(p) return invBody:transformPoint(parentWorld:transformPoint(p)) end
@@ -135,6 +188,14 @@ local function setupCar(i)
         local mesh = {ref = ref, name = name, orig = verts, n = verts:size(), interior = kind == 'interior',  -- work: a copy made at the first dent
           px = {}, py = {}, pz = {}, nx = {}, ny = {}, nz = {}, moved = {},
           toMesh = {bx.x, bx.y, bx.z, by.x, by.y, by.z, bz.x, bz.y, bz.z}}
+        if item.outside then
+          -- where its node sat on the body (its origin and two axes' ends), to tell if it moves after all
+          mesh.outside = true
+          mesh.parentNode = parentNode
+          mesh.rest = {o, toBody(vec3(1, 0, 0)), toBody(vec3(0, 0, 1))}
+        end
+        status = where .. (mesh.interior and 'interior (moves ' .. math.floor(settings.interiorShare * 100 + 0.5) .. '%)' or 'body')
+          .. ', ' .. verts:size() .. ' vertices'
         local raw = verts.raw
         for v = 0, mesh.n - 1 do
           local p, nn = raw[v].pos, raw[v].normal
@@ -154,10 +215,12 @@ local function setupCar(i)
           if v % 2000 == 0 then t0 = budget(t0) end
         end
         body.meshes[#body.meshes + 1] = mesh
+        item.mesh = mesh
         body.vertices = body.vertices + mesh.n
         trace('mesh %d/%d: read', m, body.meshCount)
       end
       end
+      body.parts[#body.parts + 1] = {name = name, status = status or '?', mesh = item.mesh}
       t0 = coroutine.yield()  -- one mesh per frame: the trace shows which one, should one crash
     end
     if #body.meshes == 0 then body.state = 'no meshes with vertices under BODYTR' return end
@@ -315,6 +378,30 @@ local function skin(body)
       local seen = {}  -- (hull) a vertex is in up to two triangles' lists: once is enough
       for mi = 1, #body.meshes do seen[mi] = {} end
       if isHull then hull.begin(l) end
+      local invBody = body.node:getWorldTransformationRaw():inverse()
+      for _, mesh in ipairs(body.meshes) do
+        if mesh.outside and not mesh.moving then
+          local w = mesh.parentNode:getWorldTransformationRaw()
+          local o, ax, az = mesh.rest[1], mesh.rest[2], mesh.rest[3]
+          local d = math.max(invBody:transformPoint(w:transformPoint(vec3(0, 0, 0))):distanceSquared(o),
+            invBody:transformPoint(w:transformPoint(vec3(1, 0, 0))):distanceSquared(ax),
+            invBody:transformPoint(w:transformPoint(vec3(0, 0, 1))):distanceSquared(az))
+          if d > 0.01 ^ 2 then
+            mesh.moving = true
+            if mesh.work then  -- all of it back as it was
+              local r, o = mesh.work.raw, mesh.orig.raw
+              for v in pairs(mesh.moved) do
+                r[v].pos.x, r[v].pos.y, r[v].pos.z = o[v].pos.x, o[v].pos.y, o[v].pos.z
+                r[v].normal.x, r[v].normal.y, r[v].normal.z = o[v].normal.x, o[v].normal.y, o[v].normal.z
+              end
+              mesh.moved, mesh.movedCount = {}, 0
+              changed[mesh] = true
+            end
+            trace('"%s" (outside BODYTR) moves on the body: not dented from now on', mesh.name)
+            for _, part in ipairs(body.parts) do if part.mesh == mesh then part.status = part.status .. '; moves on the body: no longer dented' end end
+          end
+        end
+      end
       -- the crunch's noise, picked once for this pass
       local crunchFn = settings.crunchStyle == 'hammered' and noise.fbm or noise.ridged
       local cf, no = 1 / settings.crunchSize, body.noiseOffset
@@ -328,6 +415,17 @@ local function skin(body)
             local mesh = body.meshes[mi]
             local s = seen[mi]
             if s[v] then mesh = nil else s[v] = true end
+            if mesh and mesh.moving then  -- a part that moves on its own: back as it was, and no more
+              if mesh.work and mesh.moved[v] then
+                local r, o = mesh.work.raw, mesh.orig.raw
+                r[v].pos.x, r[v].pos.y, r[v].pos.z = o[v].pos.x, o[v].pos.y, o[v].pos.z
+                r[v].normal.x, r[v].normal.y, r[v].normal.z = o[v].normal.x, o[v].normal.y, o[v].normal.z
+                mesh.moved[v] = nil
+                mesh.movedCount = (mesh.movedCount or 1) - 1
+                changed[mesh] = true
+              end
+              mesh = nil
+            end
             if mesh then
             if not mesh.work and not mesh.failed then
               mesh.work = freshVertices(mesh, 'to dent')
@@ -394,12 +492,14 @@ local function skin(body)
               local mx, my, mz = T[1] * qx + T[4] * qy + T[7] * qz, T[2] * qx + T[5] * qy + T[8] * qz, T[3] * qx + T[6] * qy + T[9] * qz
               local len = math.sqrt(mx * mx + my * my + mz * mz)
               if len > 0 then raw[v].normal.x, raw[v].normal.y, raw[v].normal.z = mx / len, my / len, mz / len end
+              if not mesh.moved[v] then mesh.movedCount = (mesh.movedCount or 0) + 1 end
               mesh.moved[v] = true
               changed[mesh] = true
             elseif raw and mesh.moved[v] then
               raw[v].pos.x, raw[v].pos.y, raw[v].pos.z = orig[v].pos.x, orig[v].pos.y, orig[v].pos.z
               raw[v].normal.x, raw[v].normal.y, raw[v].normal.z = orig[v].normal.x, orig[v].normal.y, orig[v].normal.z
               mesh.moved[v] = nil
+              mesh.movedCount = (mesh.movedCount or 1) - 1
               changed[mesh] = true
             end
             count = count + 1
@@ -431,7 +531,7 @@ local function restoreNow(body)
     elseif mesh.sent then
       mesh.ref:alterVertices(mesh.orig)
     end
-    mesh.sent, mesh.work, mesh.moved, mesh.failed = nil, nil, {}, nil
+    mesh.sent, mesh.work, mesh.moved, mesh.failed, mesh.movedCount = nil, nil, {}, nil, 0
   end
 end
 -- unloading (AC closing, the app reloaded): the originals back
@@ -457,9 +557,16 @@ local function dentWorld(body, worldPos, worldDir, depth, radius, severity)
   local inv = w:inverse()
   local p = inv:transformPoint(worldPos)
   local d = inv:transformVector(worldDir):normalize()
-  -- how much this way gives: pushed backwards (hit in the front), forwards (from behind), sideways, down
+  -- how much this way gives: pushed backwards (hit in the front), forwards (from behind), sideways, down. Sideways,
+  -- the doors give least (beams in them) and the quarters towards the ends most (crumple zones): from the
+  -- middle 40% of the length to the last 20% at each end, the side's give goes from sideGive to endGive
   local along = d.z * body.forward  -- > 0: pushed forwards (a hit from behind)
-  local give = (along < 0 and settings.frontGive or settings.rearGive) * d.z * d.z + settings.sideGive * d.x * d.x
+  local half = (body.max[3] - body.min[3]) / 2
+  local e = math.abs(p.z - (body.min[3] + body.max[3]) / 2) / half
+  local t = math.max(0, math.min(1, (e - 0.4) / 0.4))
+  t = t * t * (3 - 2 * t)
+  local side = settings.sideGive + (settings.endGive - settings.sideGive) * t
+  local give = (along < 0 and settings.frontGive or settings.rearGive) * d.z * d.z + side * d.x * d.x
     + settings.roofGive * d.y * d.y
   depth = depth * give
   local dent = body.kind == 'hull' and hull.dent or lattice.dent
@@ -760,6 +867,7 @@ local function undoC()
   trace('test C undone')
 end
 
+local showParts = false
 function script.windowMain(dt)
   local body = cars[sim.focusedCar]
   if not body then
@@ -785,6 +893,13 @@ function script.windowMain(dt)
       body.lastSkinCount or 0, body.lastSkinMs or 0, body.lastSkinSpan or 0))
     ui.text(('Dents: %d (%d from crashes%s)'):format(body.dents, body.crashes or 0,
       body.lastCrash and ('; last %.1f m/s'):format(body.lastCrash) or ''))
+  end
+  if body.parts and ui.checkbox('Show the parts (what was read, and what\'s dented now)', showParts) then showParts = not showParts end
+  if showParts and body.parts then
+    for _, part in ipairs(body.parts) do
+      local moved = part.mesh and (part.mesh.movedCount or 0) or 0
+      ui.textWrapped(('%s: %s%s'):format(part.name, part.status, moved > 0 and ('; %d vertices moved now'):format(moved) or ''))
+    end
   end
   ui.separator()
   ui.text('Test dents:')
@@ -819,7 +934,8 @@ end
 function script.windowSettings(dt)
   slider('frontGive', 'Front gives: %.0f%%', 20, 300, 100)
   slider('rearGive', 'Rear gives: %.0f%%', 20, 300, 100)
-  slider('sideGive', 'Sides give: %.0f%%', 20, 300, 100)
+  slider('sideGive', 'Doors give (pushed sideways): %.0f%%', 20, 300, 100)
+  slider('endGive', 'Quarters give (sideways, at the ends): %.0f%%', 20, 300, 100)
   slider('roofGive', 'Roof gives: %.0f%%', 20, 300, 100)
   slider('maxBodyIn', 'Body moves at most: %.3f m', 0.03, 0.5)
   slider('maxInteriorIn', 'Interior moves at most: %.3f m', 0, 0.3)
@@ -842,6 +958,7 @@ function script.windowSettings(dt)
     settings.method = settings.method == 'copy' and 'direct' or 'copy'
   end
   if ui.checkbox('Dents from crashes', settings.crashDents) then settings.crashDents = not settings.crashDents end
+  if ui.checkbox('Also dent parts outside BODYTR (not wheels etc.; rebuild)', settings.outsideBody) then settings.outsideBody = not settings.outsideBody end
   slider('crashScale', 'Crash dent scale: %.2f', 0.1, 3)
   slider('crunchSize', 'Crunch: biggest creases %.2f m', 0.04, 0.5)
   slider('maxCrunch', 'Crunch: at most %.3f m', 0.005, 0.2)
@@ -858,4 +975,4 @@ function script.windowSettings(dt)
   end
 end
 
-if __softdamageTest then __softdamageTest.cars = cars __softdamageTest.jobs = jobs end
+if __softdamageTest then __softdamageTest.cars = cars __softdamageTest.jobs = jobs __softdamageTest.dentWorld = dentWorld end
