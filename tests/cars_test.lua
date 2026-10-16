@@ -43,8 +43,12 @@ H.car2.distanceToCamera = 400
 for _ = 1, 5 do H.frame() end
 check(cars[1] and cars[1].state == 'ready', 'a dented car far away stays read')
 check((H.detailed[1] or 0) == before + 1, 'and past the distance, left to AC: ' .. tostring(H.detailed[1]))
--- repaired (to the pits) and far: let go
+-- repaired (to the pits) and far, and memory getting full: let go (not otherwise: reading it again costs more)
 H.jumps[1](1)
+H.settle()
+for _ = 1, 5 do H.frame() end
+check(cars[1] ~= nil, 'an undamaged far car is kept while there is room')
+H.storage.maxVertices = math.floor((cars[0].vertices + cars[1].vertices) * 1.05)
 H.settle()
 for _ = 1, 5 do H.frame() end
 check(cars[1] == nil, 'an undamaged car far away is let go')
@@ -118,6 +122,24 @@ for _ = 1, 30 do
 end
 check((c5[0].crashes or 0) == 1 and (c5[1].crashes or 0) == 1, ('both cars dented: %s, %s'):format(tostring(c5[0].crashes), tostring(c5[1].crashes)))
 check(maxInFrame == 1, 'one crash dent a frame at most: ' .. maxInFrame)
+-- dents go first: the watched car's dent shows while another car is still being read
+local H6 = require('tests/scene_mock')({n = 40, cars = 2})
+H6.car2.distanceToCamera = 400  -- (not read yet)
+H6.load()
+H6.settle()
+for _ = 1, 5 do H6.frame() end
+H6.settle()
+local c6 = H6.state.cars
+check(c6[0] and c6[0].state == 'ready' and not c6[1], '(the other car not read yet)')
+H6.car2.distanceToCamera = 30
+H6.frame()  -- starts reading the other car
+local W6 = c6[0].node:getWorldTransformationRaw()
+local sent0 = H6.altered.body or 0
+H6.state.dentWorld(c6[0], W6:transformPoint(vec3(0, 0.6, 2.2)), W6:transformVector(vec3(0, 0, -1)), 0.15, 0.6)
+local frames = 0
+while (H6.altered.body or 0) == sent0 and frames < 200 do H6.frame() frames = frames + 1 end
+check(c6[1] and c6[1].state == 'reading meshes', 'the other car still being read: ' .. tostring(c6[1] and c6[1].state))
+check(frames < 30, ('the dent showed after %d frames, before the reading finished'):format(frames))
 for _, b in pairs(cars) do check(not b.error, 'no errors: ' .. tostring(b.error)) end
 print(fails == 0 and 'cars test passed' or ('cars test: ' .. fails .. ' failed'))
 os.exit(fails == 0 and 0 or 1)

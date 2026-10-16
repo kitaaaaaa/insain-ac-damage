@@ -259,7 +259,7 @@ function M.new(meshes, min, max, ringSpacing, around, tick)
   h.changed = {}
   -- the triangles' shapes now, worked out once per pass (see begin())
   h.pass, h.stamp = 0, {}
-  h.cx_, h.cy_, h.cz_ = {}, {}, {}
+  h.dcx, h.dcy, h.dcz = {}, {}, {}
   h.f1x, h.f1y, h.f1z, h.f2x, h.f2y, h.f2z, h.fnx, h.fny, h.fnz = {}, {}, {}, {}, {}, {}, {}, {}, {}
   return h
 end
@@ -370,17 +370,22 @@ function M.newBindings(n)
     b1 = arrays.floats(k), b2 = arrays.floats(k), b3 = arrays.floats(k)}
 end
 
--- A new pass over the vertices: the triangles' shapes are worked out again when first needed.
-function M.begin(h) h.pass = h.pass + 1 end
+-- A new pass over the vertices: every triangle's shape worked out now (a few thousand at most), so the loop
+-- over the vertices never branches off to do it (LuaJIT then compiles that loop).
+local prep
+function M.begin(h)
+  h.pass = h.pass + 1
+  for t = 0, h.tris - 1 do prep(h, t) end
+end
 
-local function prep(h, t)
+function prep(h, t)
   local a, b, c = h.ta[t], h.tb[t], h.tc[t]
   local ax, ay, az, dx, dy, dz = h.ax, h.ay, h.az, h.dx, h.dy, h.dz
   local Ax, Ay, Az = ax[a] + dx[a], ay[a] + dy[a], az[a] + dz[a]
   local e1x, e1y, e1z = ax[b] + dx[b] - Ax, ay[b] + dy[b] - Ay, az[b] + dz[b] - Az
   local e2x, e2y, e2z = ax[c] + dx[c] - Ax, ay[c] + dy[c] - Ay, az[c] + dz[c] - Az
   local cx, cy, cz = e1y * e2z - e1z * e2y, e1z * e2x - e1x * e2z, e1x * e2y - e1y * e2x
-  h.cx_[t], h.cy_[t], h.cz_[t] = cx, cy, cz
+  h.dcx[t], h.dcy[t], h.dcz[t] = cx - h.rcx[t], cy - h.rcy[t], cz - h.rcz[t]
   local l1 = sqrt(e1x * e1x + e1y * e1y + e1z * e1z)
   local ln = sqrt(cx * cx + cy * cy + cz * cz)
   if l1 < 1e-9 or ln < 1e-12 then  -- crushed flat: keep the rest frame
@@ -398,45 +403,46 @@ local function prep(h, t)
   h.stamp[t] = h.pass
 end
 
--- A vertex's offset from rest (ox, oy, oz), its new normal (qx, qy, qz) and the crunch there; nil when none of
--- its atoms has moved (the common case: it stays put).
-function M.sample(h, b, i)
-  local S = M.SLOTS
-  local base = i * S
-  local bt, on, ta, tb, tc = b.bt, h.on, h.ta, h.tb, h.tc
-  local any = 0
-  for j = 0, S - 1 do
-    local t = bt[base + j]
-    if t >= 0 then any = any + on[ta[t]] + on[tb[t]] + on[tc[t]] end
-  end
-  if any == 0 then return nil end
+-- One slot's share of a vertex's move (weighted): offset, normal, crunch; zeros for an unused slot.
+local function slot(h, b, k)
+  local t = b.bt[k]
+  if t < 0 then return 0, 0, 0, 0, 0, 0, 0 end
+  local w, u, v, hh = b.bw[k], b.bu[k], b.bv[k], b.bh[k]
+  local a, bb, c = h.ta[t], h.tb[t], h.tc[t]
   local dx, dy, dz, cr = h.dx, h.dy, h.dz, h.cr
-  local ox, oy, oz, qx, qy, qz, crunch = 0, 0, 0, 0, 0, 0, 0
-  for j = 0, S - 1 do
-    local t = bt[base + j]
-    if t >= 0 then
-      if h.stamp[t] ~= h.pass then prep(h, t) end
-      local w, u, v, hh = b.bw[base + j], b.bu[base + j], b.bv[base + j], b.bh[base + j]
-      local a, bb, c = ta[t], tb[t], tc[t]
-      -- (a' + u e1' + v e2' + h c') - (a + u e1 + v e2 + h c): the atoms' offsets mixed, and the cross product's change
-      local wa = 1 - u - v
-      ox = ox + w * (wa * dx[a] + u * dx[bb] + v * dx[c] + hh * (h.cx_[t] - h.rcx[t]))
-      oy = oy + w * (wa * dy[a] + u * dy[bb] + v * dy[c] + hh * (h.cy_[t] - h.rcy[t]))
-      oz = oz + w * (wa * dz[a] + u * dz[bb] + v * dz[c] + hh * (h.cz_[t] - h.rcz[t]))
-      local c1, c2, c3 = b.b1[base + j], b.b2[base + j], b.b3[base + j]
-      qx = qx + w * (c1 * h.f1x[t] + c2 * h.f2x[t] + c3 * h.fnx[t])
-      qy = qy + w * (c1 * h.f1y[t] + c2 * h.f2y[t] + c3 * h.fny[t])
-      qz = qz + w * (c1 * h.f1z[t] + c2 * h.f2z[t] + c3 * h.fnz[t])
-      -- the crunch: the atoms' mixed inside the triangle (clamped to it)
-      local pu, pv = math.max(0, u), math.max(0, v)
-      local pa = math.max(0, wa)
-      local ps = pa + pu + pv
-      crunch = crunch + w * (pa * cr[a] + pu * cr[bb] + pv * cr[c]) / ps
-    end
-  end
+  -- (a' + u e1' + v e2' + h c') - (a + u e1 + v e2 + h c): the atoms' offsets mixed, and the cross product's change
+  local wa = 1 - u - v
+  local c1, c2, c3 = w * b.b1[k], w * b.b2[k], w * b.b3[k]
+  -- the crunch: the atoms' mixed inside the triangle (clamped to it)
+  local pu = u > 0 and u or 0
+  local pv = v > 0 and v or 0
+  local pa = wa > 0 and wa or 0
+  return w * (wa * dx[a] + u * dx[bb] + v * dx[c] + hh * h.dcx[t]),
+    w * (wa * dy[a] + u * dy[bb] + v * dy[c] + hh * h.dcy[t]),
+    w * (wa * dz[a] + u * dz[bb] + v * dz[c] + hh * h.dcz[t]),
+    c1 * h.f1x[t] + c2 * h.f2x[t] + c3 * h.fnx[t],
+    c1 * h.f1y[t] + c2 * h.f2y[t] + c3 * h.fny[t],
+    c1 * h.f1z[t] + c2 * h.f2z[t] + c3 * h.fnz[t],
+    w * (pa * cr[a] + pu * cr[bb] + pv * cr[c]) / (pa + pu + pv)
+end
+
+-- A vertex's offset from rest (ox, oy, oz), its new normal (qx, qy, qz) and the crunch there; nil when none of
+-- its atoms has moved (the common case: it stays put). The two slots (M.SLOTS) written out: a loop carrying
+-- seven sums, LuaJIT couldn't compile ("register coalescing too complex").
+function M.sample(h, b, i)
+  local k = i * 2
+  local bt, on, ta, tb, tc = b.bt, h.on, h.ta, h.tb, h.tc
+  local t0, t1 = bt[k], bt[k + 1]
+  local any = 0
+  if t0 >= 0 then any = any + on[ta[t0]] + on[tb[t0]] + on[tc[t0]] end
+  if t1 >= 0 then any = any + on[ta[t1]] + on[tb[t1]] + on[tc[t1]] end
+  if any == 0 then return nil end
+  local ox, oy, oz, qx, qy, qz, cr = slot(h, b, k)
+  local ox2, oy2, oz2, qx2, qy2, qz2, cr2 = slot(h, b, k + 1)
+  qx, qy, qz = qx + qx2, qy + qy2, qz + qz2
   local ql = sqrt(qx * qx + qy * qy + qz * qz)
-  if ql > 1e-9 then qx, qy, qz = qx / ql, qy / ql, qz / ql end
-  return ox, oy, oz, qx, qy, qz, crunch
+  if ql < 1e-9 then ql = 1 end
+  return ox + ox2, oy + oy2, oz + oz2, qx / ql, qy / ql, qz / ql, cr + cr2
 end
 
 -- A dent: atoms within `radius` of p (at least the nearest one) move along dir by up to `depth`, with a smooth

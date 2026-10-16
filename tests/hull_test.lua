@@ -2,6 +2,7 @@
 -- luajit tests/hull_test.lua   (from the app folder)
 package.path = './?.lua;' .. package.path
 local hull = require('src/hull')
+local sample = hull.sample
 local fails = 0
 local function check(c, msg) if not c then fails = fails + 1 print('FAIL: ' .. msg) end end
 
@@ -62,7 +63,7 @@ check(worst < 1e-6, ('bindings rebuild their vertices (stored as floats): off by
 check(outside == 0, 'vertices pinned near their triangles (in concave spots, a little off its edges): ' .. outside .. ' far off')
 -- at rest nothing moves
 local any = false
-for v = 0, mesh.n - 1 do if hull.sample(h, b, v) then any = true end end
+for v = 0, mesh.n - 1 do if sample(h, b, v) then any = true end end
 check(not any, 'at rest, no vertex moves')
 -- the whole hull moved rigidly (turned 20 degrees about y and shifted): every vertex moves with it exactly
 local ang = math.rad(20)
@@ -74,7 +75,7 @@ end
 hull.begin(h)
 local worstP, worstN = 0, 0
 for v = 0, mesh.n - 1 do
-  local ox, oy, oz, qx, qy, qz = hull.sample(h, b, v)
+  local ox, oy, oz, qx, qy, qz = sample(h, b, v)
   local x, y, z = mesh.px[v], mesh.py[v], mesh.pz[v]
   local ex, ey, ez = c * x + s * z + 0.3, y - 0.1, -s * x + c * z + 0.5
   worstP = math.max(worstP, math.abs(x + ox - ex), math.abs(y + oy - ey), math.abs(z + oz - ez))
@@ -95,7 +96,7 @@ check(nt > 0 and nt < h.tris / 4, 'triangles to redo: ' .. nt)
 hull.begin(h)
 local deepest, far, outward, most = 0, 0, 0, 0
 for v = 0, mesh.n - 1 do
-  local ox, oy, oz = hull.sample(h, b, v)
+  local ox, oy, oz = sample(h, b, v)
   if ox then
     if mesh.px[v] > 0.85 and math.abs(mesh.pz[v]) < 0.3 and math.abs(mesh.py[v] - 0.55) < 0.2 then deepest = math.max(deepest, -ox) end
     if mesh.px[v] < 0 and math.abs(ox) + math.abs(oy) + math.abs(oz) > 1e-4 then far = far + 1 end

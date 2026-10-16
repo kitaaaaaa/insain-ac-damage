@@ -6,6 +6,21 @@ vertex of the body is pinned to the hull's triangles and follows them. 1nsane's 
 by hand; here the hull is built from the car's own meshes. Visual only: AC's physics and collisions don't
 change.
 
+## New in 0.7.3: dents show sooner, less work a frame
+
+- **Dents first**: the background work now does dents (re-skinning, what you see) first, up to 4 ms a frame,
+  and only then reads cars, up to 2 ms (settings). Before, a dent waited behind whichever car was being read:
+  in a test, 14 frames there, 3 now; on real cars, with hundreds of meshes, it was seconds.
+- **Reading a car is quicker**: it used to read one mesh a frame (cars with 900 meshes took 900 frames before
+  the work even started); now as many as fit in its 2 ms.
+- **No reading the same cars again and again**: an undamaged car going far away was let go and read again when
+  it came back, so AI cars lapping were read every lap. Now cars stay read, and the farthest undamaged ones are
+  let go only when the vertex budget is nearly full.
+- **Re-skinning is faster**: each vertex's crunch noise is worked out once, when the car is read (it depends
+  only on where the vertex is), not at every dent; and the per-vertex code is written so LuaJIT compiles it (it
+  was running partly interpreted: "register coalescing too complex"). A crash-sized dent on a 70,000-vertex test
+  body (about 33,000 vertices moved) went from about 46 ms of work to about 26 ms, spread over frames.
+
 ## New in 0.7.2: the real cause of the slowdown (from your trace)
 
 The trace showed it: on some cars a mesh sits far from the body (hundreds of metres; the crash lines put hits

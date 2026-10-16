@@ -50,7 +50,8 @@ local settings = ac.storage{
   outsideBody = true,  -- also dent the car's meshes outside BODYTR (lights, glass, trim), unless on moving parts
   crashDents = true,   -- dents from crashes
   crashScale = 1,
-  budgetMs = 4,        -- work per frame (setup and re-skinning)
+  budgetMs = 4,        -- work per frame on dents (re-skinning), first
+  setupBudgetMs = 2,   -- then on reading cars
   sendBudget = 150000, -- vertices sent to AC a frame at most (alterVertices), the rest the next
 }
 
@@ -83,17 +84,31 @@ local function totalVertices()
   return n
 end
 
-local function runJobs()
+-- The background work, a frame at a time: dents first (re-skinning: what you see), up to budgetMs; then reading
+-- cars, up to setupBudgetMs (it can wait).
+local jobBudget = 4
+local function runPhase(setup, ms)
   local t0 = nowMs()
-  while #jobs > 0 and nowMs() - t0 < settings.budgetMs do
-    local j = jobs[1]
-    local ok, err = coroutine.resume(j.co, t0)
-    if not ok then log(j.name .. ': ' .. tostring(err)) j.body.error = tostring(err) table.remove(jobs, 1)
-    elseif coroutine.status(j.co) == 'dead' then table.remove(jobs, 1) end
+  jobBudget = ms
+  local k = 1
+  while k <= #jobs and nowMs() - t0 < ms do
+    local j = jobs[k]
+    if (j.setup == true) ~= setup then
+      k = k + 1
+    else
+      local ok, err = coroutine.resume(j.co, t0)
+      if not ok then log(j.name .. ': ' .. tostring(err)) j.body.error = tostring(err) table.remove(jobs, k)
+      elseif coroutine.status(j.co) == 'dead' then table.remove(jobs, k)
+      else break end  -- (it yielded: the budget's used)
+    end
   end
 end
+local function runJobs()
+  runPhase(false, settings.budgetMs)
+  runPhase(true, settings.setupBudgetMs)
+end
 -- yields when the frame's budget is used up
-local function budget(t0) if nowMs() - t0 > settings.budgetMs then t0 = coroutine.yield() end return t0 end
+local function budget(t0) if nowMs() - t0 > jobBudget then t0 = coroutine.yield() end return t0 end
 
 -- What a mesh is, by AC's node names: 'skip' for the driver, the steering wheel and gauge needles (they never
 -- move; CSP animates some of them), 'interior' for the cockpit (it moves a little with the body), or nil for
@@ -246,7 +261,7 @@ local function setupCar(i)
       end
       end
       body.parts[#body.parts + 1] = {name = name, status = status or '?', mesh = item.mesh}
-      t0 = coroutine.yield()  -- one mesh per frame: the trace shows which one, should one crash
+      t0 = budget(t0)
     end
     -- the car's box: AC's bounding box of the car (or, without one, around the middle of its meshes). Some cars
     -- have a mesh far from the body (hundreds of metres, in one test): left alone, or the hull would be built
@@ -338,6 +353,21 @@ local function setupCar(i)
       t0 = budget(t0)
     end
     body.users = users
+    -- each vertex's crunch noise, now (in the background), so a crash only has to move vertices
+    local key = settings.crunchStyle .. settings.crunchSize
+    body.noiseKey, body.noiseVer = key, 1
+    local crunchFn = settings.crunchStyle == 'hammered' and noise.fbm or noise.ridged
+    local f, no = 1 / settings.crunchSize, body.noiseOffset
+    for _, mesh in ipairs(body.meshes) do
+      mesh.noise, mesh.noiseVer = arrays.floats(mesh.n * 4), arrays.bytes(mesh.n)
+      local cache = mesh.noise
+      for v = 0, mesh.n - 1 do
+        local n0, g0, g1, g2 = noise.withGrad(crunchFn, mesh.px[v] * f + no[1], mesh.py[v] * f + no[2], mesh.pz[v] * f + no[3], 3, 0.5, 0.05)
+        cache[v * 4], cache[v * 4 + 1], cache[v * 4 + 2], cache[v * 4 + 3] = n0, g0, g1, g2
+        mesh.noiseVer[v] = 1
+        if v % 500 == 0 then t0 = budget(t0) end
+      end
+    end
     -- each body vertex's clearance: how far it is from the nearest interior vertex (it can't go in further than
     -- that plus what the interior there gives), through a 0.1 m grid of the interior's vertices
     local G = 0.1
@@ -441,6 +471,97 @@ local function send(mesh)
   if not mesh.sent then trace('alterVertices on the copy of "%s": done', mesh.name) mesh.sent = true end
 end
 
+-- Moves one vertex with the atoms (into mesh.work) and says if it changed. Its own function: the loop around it
+-- then carries few values, so LuaJIT compiles it (written inline it didn't: "register coalescing too complex").
+-- The crunch on a vertex's move: returns it with the crunch added (noise kept per vertex, see setupCar).
+local function crunchVertex(ctx, mesh, v, ox, oy, oz, qx, qy, qz, crunch, limit)
+  local f, n4 = ctx.cf, v * 4
+  local cache = mesh.noise
+  if mesh.noiseVer[v] ~= ctx.noiseVer then
+    local no = ctx.no
+    local n0, g0, g1, g2 = noise.withGrad(ctx.crunchFn, mesh.px[v] * f + no[1], mesh.py[v] * f + no[2], mesh.pz[v] * f + no[3], 3, 0.5, 0.05)
+    cache[n4], cache[n4 + 1], cache[n4 + 2], cache[n4 + 3] = n0, g0, g1, g2
+    mesh.noiseVer[v] = ctx.noiseVer
+  end
+  local nx0, ny0, nz0 = mesh.nx[v], mesh.ny[v], mesh.nz[v]
+  local d = crunch * cache[n4]
+  ox, oy, oz = ox + nx0 * d, oy + ny0 * d, oz + nz0 * d
+  -- the crunch doesn't take it past its limit either
+  local l2 = ox * ox + oy * oy + oz * oz
+  local k = l2 > limit * limit and limit / math.sqrt(l2) or 1
+  local s = f * crunch  -- slope of the surface, per metre
+  local gx, gy, gz = cache[n4 + 1] * s, cache[n4 + 2] * s, cache[n4 + 3] * s
+  local gn = gx * nx0 + gy * ny0 + gz * nz0
+  qx, qy, qz = qx - (gx - gn * nx0), qy - (gy - gn * ny0), qz - (gz - gn * nz0)
+  local ql = math.sqrt(qx * qx + qy * qy + qz * qz)
+  if ql < 1e-6 then ql = 1 end
+  return ox * k, oy * k, oz * k, qx / ql, qy / ql, qz / ql
+end
+
+-- Moves one vertex with the atoms (into mesh.work) and says if it changed. Its own function, so the loop around
+-- it carries few values (LuaJIT compiles it).
+local function skinVertex(ctx, mesh, v)
+  local raw, orig = mesh.work.raw, mesh.orig.raw
+  local ox, oy, oz, qx, qy, qz, crunch
+  if ctx.isHull then
+    ox, oy, oz, qx, qy, qz, crunch = hull.sample(ctx.l, mesh.bind, v)
+  else
+    local ax, ay, az, bx, by, bz, cx, cy, cz
+    ox, oy, oz, ax, ay, az, bx, by, bz, cx, cy, cz, crunch = lattice.sample(ctx.l, mesh.px[v], mesh.py[v], mesh.pz[v])
+    if ox then qx, qy, qz = lattice.bendNormal(mesh.nx[v], mesh.ny[v], mesh.nz[v], ax, ay, az, bx, by, bz, cx, cy, cz) end
+  end
+  if not ox then
+    if mesh.moved[v] == 1 then  -- back as it was
+      raw[v].pos.x, raw[v].pos.y, raw[v].pos.z = orig[v].pos.x, orig[v].pos.y, orig[v].pos.z
+      raw[v].normal.x, raw[v].normal.y, raw[v].normal.z = orig[v].normal.x, orig[v].normal.y, orig[v].normal.z
+      mesh.moved[v] = 0
+      mesh.movedCount = (mesh.movedCount or 1) - 1
+      return true
+    end
+    return false
+  end
+  local share, maxInterior = ctx.share, ctx.maxInterior
+  if mesh.interior then  -- the interior: a share of what the body does
+    local k = share
+    ox, oy, oz, crunch = ox * k, oy * k, oz * k, crunch * k
+    local nx0, ny0, nz0 = mesh.nx[v], mesh.ny[v], mesh.nz[v]
+    qx, qy, qz = nx0 + k * (qx - nx0), ny0 + k * (qy - ny0), nz0 + k * (qz - nz0)
+    local ql = math.sqrt(qx * qx + qy * qy + qz * qz)
+    if ql < 1e-9 then ql = 1 end
+    qx, qy, qz = qx / ql, qy / ql, qz / ql
+  end
+  -- how far it may move: the interior a quarter foot; the body half a foot, and only as far as closes the gap to
+  -- the interior behind it. The same dent moves the interior there `share` as much (up to its own limit), so the
+  -- body may move L with L - min(maxInterior, share L) <= its clearance. Beyond that the metal crumples instead:
+  -- the excess goes to the crunch
+  local limit = maxInterior
+  if not mesh.interior then
+    local c = math.max(0, mesh.clear[v] - 0.015)
+    local L = c / (1 - share)
+    if share * L > maxInterior then L = c + maxInterior end
+    limit = math.min(ctx.maxBody, L)
+  end
+  local len = math.sqrt(ox * ox + oy * oy + oz * oz)
+  local k = len > limit and limit / len or 1
+  ox, oy, oz = ox * k, oy * k, oz * k
+  crunch = math.min(ctx.maxCrunch, crunch + math.max(0, len - limit) * 0.3)
+  -- crunch: the metal pushed in and out along its surface's normal by noise (creases ~crunchSize and finer), as
+  -- much as the crunch there; the normal tilts with the noise's slope
+  if crunch > 1e-4 then ox, oy, oz, qx, qy, qz = crunchVertex(ctx, mesh, v, ox, oy, oz, qx, qy, qz, crunch, limit) end
+  -- the offset and normal into the mesh's own space
+  local T = mesh.toMesh
+  local r, o = raw[v], orig[v]
+  r.pos.x = o.pos.x + T[1] * ox + T[4] * oy + T[7] * oz
+  r.pos.y = o.pos.y + T[2] * ox + T[5] * oy + T[8] * oz
+  r.pos.z = o.pos.z + T[3] * ox + T[6] * oy + T[9] * oz
+  local mx, my, mz = T[1] * qx + T[4] * qy + T[7] * qz, T[2] * qx + T[5] * qy + T[8] * qz, T[3] * qx + T[6] * qy + T[9] * qz
+  local ml = math.sqrt(mx * mx + my * my + mz * mz)
+  if ml > 0 then r.normal.x, r.normal.y, r.normal.z = mx / ml, my / ml, mz / ml end
+  if mesh.moved[v] == 0 then mesh.movedCount = (mesh.movedCount or 0) + 1 end
+  mesh.moved[v] = 1
+  return true
+end
+
 -- Moves the vertices near atoms that moved since last time (in the lattice cells or on the hull triangles next
 -- to them) with the atoms, then sends each changed mesh to the GPU.
 local function skin(body)
@@ -483,9 +604,13 @@ local function skin(body)
       end
       -- the crunch's noise, picked once for this pass
       local crunchFn = settings.crunchStyle == 'hammered' and noise.fbm or noise.ridged
-      local cf, no = 1 / settings.crunchSize, body.noiseOffset
-      local withGrad = noise.withGrad
-      local share, maxBody, maxInterior, maxCrunch = settings.interiorShare, settings.maxBodyIn, settings.maxInteriorIn, settings.maxCrunch
+      -- each vertex's noise is kept (it depends only on where the vertex is at rest), till the crunch's style or
+      -- size changes
+      local key = settings.crunchStyle .. settings.crunchSize
+      if body.noiseKey ~= key then body.noiseKey, body.noiseVer = key, (body.noiseVer or 0) % 255 + 1 end
+      local ctx = {isHull = isHull, l = l, share = settings.interiorShare, maxBody = settings.maxBodyIn,
+        maxInterior = settings.maxInteriorIn, maxCrunch = settings.maxCrunch, crunchFn = crunchFn,
+        cf = 1 / settings.crunchSize, no = body.noiseOffset, noiseVer = body.noiseVer}
       for key in pairs(isHull and hull.takeChanged(l) or lattice.takeChanged(l)) do
         local list = body.users[key]
         if list then
@@ -508,86 +633,17 @@ local function skin(body)
               mesh = nil
             end
             if mesh then
-            if not mesh.work and not mesh.failed then
-              mesh.work = freshVertices(mesh, 'to dent')
-              mesh.failed = mesh.work == nil  -- left as it is
-            end
-            local raw, orig = mesh.work and mesh.work.raw, mesh.orig.raw
-            local T = mesh.toMesh
-            local nx0, ny0, nz0 = mesh.nx[v], mesh.ny[v], mesh.nz[v]
-            local ox, oy, oz, qx, qy, qz, crunch
-            if raw then
-              if isHull then
-                ox, oy, oz, qx, qy, qz, crunch = hull.sample(l, mesh.bind, v)
-              else
-                local ax, ay, az, bx, by, bz, cx, cy, cz
-                ox, oy, oz, ax, ay, az, bx, by, bz, cx, cy, cz, crunch = lattice.sample(l, mesh.px[v], mesh.py[v], mesh.pz[v])
-                if ox then qx, qy, qz = lattice.bendNormal(nx0, ny0, nz0, ax, ay, az, bx, by, bz, cx, cy, cz) end
+              if not mesh.work and not mesh.failed then
+                mesh.work = freshVertices(mesh, 'to dent')
+                mesh.failed = mesh.work == nil  -- left as it is
+                if mesh.work and not mesh.noise then mesh.noise, mesh.noiseVer = arrays.floats(mesh.n * 4), arrays.bytes(mesh.n) end
               end
-            end
-            if ox then
-              if mesh.interior then  -- the interior: a share of what the body does
-                local k = share
-                ox, oy, oz, crunch = ox * k, oy * k, oz * k, crunch * k
-                qx, qy, qz = nx0 + k * (qx - nx0), ny0 + k * (qy - ny0), nz0 + k * (qz - nz0)
-                local ql = math.sqrt(qx * qx + qy * qy + qz * qz)
-                if ql > 1e-9 then qx, qy, qz = qx / ql, qy / ql, qz / ql end
-              end
-              -- how far it may move: the interior a quarter foot; the body half a foot, and only as far as closes
-              -- the gap to the interior behind it. The same dent moves the interior there `share` as much (up to
-              -- its own limit), so the body may move L with L - min(maxInterior, share L) <= its clearance.
-              -- Beyond that the metal crumples instead: the excess goes to the crunch
-              local limit = maxInterior
-              if not mesh.interior then
-                local c = math.max(0, mesh.clear[v] - 0.015)
-                local L = c / (1 - share)
-                if share * L > maxInterior then L = c + maxInterior end
-                limit = math.min(maxBody, L)
-              end
-              local len = math.sqrt(ox * ox + oy * oy + oz * oz)
-              if len > limit then
-                local k = limit / len
-                ox, oy, oz = ox * k, oy * k, oz * k
-                crunch = math.min(maxCrunch, crunch + (len - limit) * 0.3)
-              end
-              -- crunch: the metal pushed in and out along its surface's normal by noise (creases ~crunchSize and
-              -- finer), as much as the crunch there; the normal tilts with the noise's slope
-              if crunch > 1e-4 then
-                local f = cf
-                local nn, gx, gy, gz = withGrad(crunchFn, mesh.px[v] * f + no[1], mesh.py[v] * f + no[2], mesh.pz[v] * f + no[3], 3, 0.5, 0.05)
-                local d = crunch * nn
-                ox, oy, oz = ox + nx0 * d, oy + ny0 * d, oz + nz0 * d
-                -- the crunch doesn't take it past its limit either
-                local l2 = ox * ox + oy * oy + oz * oz
-                if l2 > limit * limit then local k = limit / math.sqrt(l2) ox, oy, oz = ox * k, oy * k, oz * k end
-                gx, gy, gz = gx * f * crunch, gy * f * crunch, gz * f * crunch  -- slope of the surface, per metre
-                local gn = gx * nx0 + gy * ny0 + gz * nz0
-                qx, qy, qz = qx - (gx - gn * nx0), qy - (gy - gn * ny0), qz - (gz - gn * nz0)
-                local ql = math.sqrt(qx * qx + qy * qy + qz * qz)
-                if ql > 1e-6 then qx, qy, qz = qx / ql, qy / ql, qz / ql end
-              end
-              -- the offset into the mesh's own space
-              raw[v].pos.x = orig[v].pos.x + T[1] * ox + T[4] * oy + T[7] * oz
-              raw[v].pos.y = orig[v].pos.y + T[2] * ox + T[5] * oy + T[8] * oz
-              raw[v].pos.z = orig[v].pos.z + T[3] * ox + T[6] * oy + T[9] * oz
-              local mx, my, mz = T[1] * qx + T[4] * qy + T[7] * qz, T[2] * qx + T[5] * qy + T[8] * qz, T[3] * qx + T[6] * qy + T[9] * qz
-              local len = math.sqrt(mx * mx + my * my + mz * mz)
-              if len > 0 then raw[v].normal.x, raw[v].normal.y, raw[v].normal.z = mx / len, my / len, mz / len end
-              if mesh.moved[v] == 0 then mesh.movedCount = (mesh.movedCount or 0) + 1 end
-              mesh.moved[v] = 1
-              changed[mesh] = true
-            elseif raw and mesh.moved[v] == 1 then
-              raw[v].pos.x, raw[v].pos.y, raw[v].pos.z = orig[v].pos.x, orig[v].pos.y, orig[v].pos.z
-              raw[v].normal.x, raw[v].normal.y, raw[v].normal.z = orig[v].normal.x, orig[v].normal.y, orig[v].normal.z
-              mesh.moved[v] = 0
-              mesh.movedCount = (mesh.movedCount or 1) - 1
-              changed[mesh] = true
+              if mesh.work and skinVertex(ctx, mesh, v) then changed[mesh] = true end
             end
             count = count + 1
             if count % 1000 == 0 then
               local t = nowMs()
-              if t - t0 > settings.budgetMs then work = work + (t - t0) t0 = coroutine.yield() end
-            end
+              if t - t0 > jobBudget then work = work + (t - t0) t0 = coroutine.yield() end
             end
           end
         end
@@ -967,7 +1023,10 @@ local function manageCars()
       local d = car.distanceToCamera or 0
       local body = cars[i]
       if not body and d < settings.readDistance and (not nearestD or d < nearestD) then nearest, nearestD = i, d end
-      if body and i ~= focused and body.state == 'ready' and not damaged(body) and not pending[i] and d > far then letGo(i) end
+      if body and i ~= focused and body.state == 'ready' and not damaged(body) and not pending[i] and d > far
+        and totalVertices() > settings.maxVertices * 0.9 then
+        letGo(i)  -- only to make room: reading a car again costs more than keeping it
+      end
       if body and body.state == 'ready' and damaged(body) and settings.keepDetailed and d < settings.detailedDistance then
         detailedList[#detailedList + 1] = i
         detailedDist[i] = d
