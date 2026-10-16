@@ -6,6 +6,27 @@ vertex of the body is pinned to the hull's triangles and follows them. 1nsane's 
 by hand; here the hull is built from the car's own meshes. Visual only: AC's physics and collisions don't
 change.
 
+## New in 0.6.0: spring limits (1nsane's)
+
+1nsane's physics files give every spring between atoms its length at rest and how far it may squash and
+stretch (half to one and a half times). Here every edge of the hull is such a spring (hull only; the box lattice
+is as it was):
+
+- **Stretch** (default 1.05x at most): sheet metal hardly stretches, so a deep dent drags the metal around it in
+  rather than poking a spike. The middle of the dent keeps its depth (it's held where the hit put it); the
+  atoms around it give.
+- **Squash** (0.5x at most): pushed harder than that, an edge shoves the next atom along.
+- **Folds**: squashed past 0.9x, the metal folds: its atoms get crunch from the squeeze (1 m of crunch per metre
+  squashed past that, times the Crunch setting, up to the crunch's limit). It's "at least this much", so the
+  same squeeze doesn't pile up dent after dent.
+- Settings: **Spring limits** on or off, and the four values. The spring passes (spreading each dent) are as
+  before; the limits come after them.
+
+Checked offline: a narrow 30 cm push that stretched edges to 1.4x without them keeps every edge within 0.5 to
+1.05x, the middle as deep, and moves over twice as many atoms; a nose pushed straight back squashes no further
+than 0.5x and folds. Modest dents look much as in 0.5.1 (the spring passes spread them already); deep crash
+dents are where it shows. Not tested in AC yet.
+
 ## New in 0.5.1
 
 - **More of the car dents**: meshes outside BODYTR are read too (see How it works), so lights and glass some

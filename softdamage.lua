@@ -17,6 +17,12 @@ local settings = ac.storage{
   hullAround = 20,     -- hull: atoms around each ring (applies on rebuild)
   spacing = 0.35,      -- box lattice: metres between atoms (applies on rebuild)
   springs = 2,         -- spring passes after each dent (0 = a dent stays exactly where it's pushed)
+  springLimits = true, -- (the hull) 1nsane's spring limits: the metal between atoms stretches and squashes only so far
+  stretchLimit = 1.05, -- an edge stretches to this times its length at most: sheet metal hardly stretches, a deep
+                       -- dent drags the metal around it in
+  squashLimit = 0.5,   -- and squashes to this at most (1nsane's own limits were 1.5 and 0.5)
+  foldAt = 0.9,        -- squashed past this, the metal folds: crunch from the squeeze
+  foldCrunch = 1,      -- metres of crunch per metre squashed past foldAt (times the crunch setting)
   maxOffset = 0.5,     -- how far an atom can be pushed in total
   maxBodyIn = 0.1524,  -- the most any spot of the body moves (half a foot)
   maxInteriorIn = 0.0762, -- the most any spot of the interior moves (a quarter foot)
@@ -570,6 +576,13 @@ local function dentWorld(body, worldPos, worldDir, depth, radius, severity)
     + settings.roofGive * d.y * d.y
   depth = depth * give
   local dent = body.kind == 'hull' and hull.dent or lattice.dent
+  if body.kind == 'hull' then
+    if settings.springLimits then
+      hull.setLimits(body.atoms, settings.stretchLimit, settings.squashLimit, settings.foldAt, settings.foldCrunch * settings.crunch)
+    else
+      hull.setLimits(body.atoms, nil)
+    end
+  end
   dent(body.atoms, p.x, p.y, p.z, d.x, d.y, d.z, depth, radius, settings.maxOffset, settings.springs, 0.35,
     crunchFor(depth, (severity or depth / 0.1) * give), settings.maxCrunch)
   body.dents = body.dents + 1
@@ -941,6 +954,13 @@ function script.windowSettings(dt)
   slider('maxInteriorIn', 'Interior moves at most: %.3f m', 0, 0.3)
   slider('interiorShare', 'Interior moves %.0f%% of the body', 0, 90, 100)
   slider('springs', 'Spring passes: %.0f', 0, 6, 1, true)
+  if ui.checkbox('Spring limits (the hull; 1nsane\'s way)', settings.springLimits) then settings.springLimits = not settings.springLimits end
+  if settings.springLimits then
+    slider('stretchLimit', 'Metal stretches to %.2fx at most', 1.0, 1.5)
+    slider('squashLimit', 'Squashes to %.2fx at most', 0.2, 0.95)
+    slider('foldAt', 'Folds when squashed past %.2fx', 0.5, 1.0)
+    slider('foldCrunch', 'Fold crunch: %.0f%%', 0, 300, 100)
+  end
   slider('maxOffset', 'Most an atom moves: %.2f m', 0.1, 1)
   local kinds = {'hull', 'box'}
   local pickKind = ui.combo('Atoms (rebuild)', settings.atoms == 'box' and 2 or 1, ui.ComboFlags.None,

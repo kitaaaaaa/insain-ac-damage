@@ -231,6 +231,19 @@ function M.new(meshes, min, max, ringSpacing, around, tick)
     h.neighbours[n] = list
   end
   h.atomTris = atomTris
+  -- springs: one per edge, with its length at rest (the limits are set with setLimits)
+  h.ea, h.eb, h.el = {}, {}, {}
+  local ne = 0
+  for n = 0, h.count - 1 do
+    for _, m in ipairs(h.neighbours[n]) do
+      if m > n then
+        h.ea[ne], h.eb[ne] = n, m
+        h.el[ne] = sqrt((ax[m] - ax[n]) ^ 2 + (ay[m] - ay[n]) ^ 2 + (az[m] - az[n]) ^ 2)
+        ne = ne + 1
+      end
+    end
+  end
+  h.edges = ne
   -- each triangle's cross product at rest
   h.rcx, h.rcy, h.rcz = {}, {}, {}
   for t = 0, nt - 1 do
@@ -486,8 +499,84 @@ function M.dent(h, px, py, pz, dirx, diry, dirz, depth, radius, maxOffset, sprin
       end
     end
   end
+  if h.limits then
+    -- how firmly each atom holds where this dent put it: the middle of the dent fully, its edges hardly
+    local most, pin = 0, {}
+    for _, n in ipairs(region) do if (w[n] or 0) > most then most = w[n] end end
+    if most > 1e-9 then for _, n in ipairs(region) do pin[n] = math.min(1, (w[n] or 0) / most) end end
+    moved = moved + M.relax(h, pin, maxOffset, maxCrunch)
+  end
   if moved > 0 then h.dirty = true end
   return moved
+end
+
+-- The springs' limits, 1nsane's way: each edge between atoms may stretch to `stretch` times its length at rest
+-- and squash to `squash` times, no further; squashed past `fold` times, the metal there folds: its atoms get
+-- crunch, `foldCrunch` metres per metre squashed past that. nil turns the limits off.
+function M.setLimits(h, stretch, squash, fold, foldCrunch, iterations)
+  if not stretch then h.limits = nil return end
+  h.limits = {stretch = stretch, squash = squash, fold = fold or 1, foldCrunch = foldCrunch or 0, iterations = iterations or 10}
+end
+
+-- Keeps every edge within its limits: an edge stretched or squashed too far moves its atoms back within them
+-- (a few passes over all of them, each correction shared by how free each atom is: `pin` [atom] = 1 holds it
+-- still, as the middle of a dent). So a deep dent drags the metal around it in, rather than poking a spike.
+-- Then the folds. Returns how many atoms changed.
+function M.relax(h, pin, maxOffset, maxCrunch)
+  local L = h.limits
+  local ax, ay, az, dx, dy, dz = h.ax, h.ay, h.az, h.dx, h.dy, h.dz
+  local ea, eb, el = h.ea, h.eb, h.el
+  local hi, lo = L.stretch, L.squash
+  local touched = {}
+  for _ = 1, L.iterations do
+    local worst = 0
+    for e = 0, h.edges - 1 do
+      local a, b = ea[e], eb[e]
+      local vx = ax[b] + dx[b] - ax[a] - dx[a]
+      local vy = ay[b] + dy[b] - ay[a] - dy[a]
+      local vz = az[b] + dz[b] - az[a] - dz[a]
+      local len = sqrt(vx * vx + vy * vy + vz * vz)
+      local rest = el[e]
+      local target = len > rest * hi and rest * hi or (len < rest * lo and rest * lo or len)
+      if target ~= len and len > 1e-9 then
+        local wa, wb = 1 - (pin[a] or 0), 1 - (pin[b] or 0)
+        local sum = wa + wb
+        if sum > 1e-9 then
+          local k = (len - target) / len / sum
+          dx[a], dy[a], dz[a] = dx[a] + vx * k * wa, dy[a] + vy * k * wa, dz[a] + vz * k * wa
+          dx[b], dy[b], dz[b] = dx[b] - vx * k * wb, dy[b] - vy * k * wb, dz[b] - vz * k * wb
+          if wa > 0 then touched[a] = true end
+          if wb > 0 then touched[b] = true end
+          local off = math.abs(len - target) / rest
+          if off > worst then worst = off end
+        end
+      end
+    end
+    if worst < 1e-4 then break end
+  end
+  local changed = 0
+  for n in pairs(touched) do
+    local len = sqrt(dx[n] * dx[n] + dy[n] * dy[n] + dz[n] * dz[n])
+    if maxOffset and len > maxOffset then local k = maxOffset / len dx[n], dy[n], dz[n] = dx[n] * k, dy[n] * k, dz[n] * k end
+    if h.on[n] == 0 or not h.changed[n] then changed = changed + 1 end
+    h.on[n] = 1
+    h.changed[n] = true
+  end
+  -- folds: squashed past `fold`, the metal crumples (at least this much crunch: it doesn't pile up dent after dent)
+  if L.foldCrunch > 0 then
+    for e = 0, h.edges - 1 do
+      local a, b = ea[e], eb[e]
+      local len = sqrt((ax[b] + dx[b] - ax[a] - dx[a]) ^ 2 + (ay[b] + dy[b] - ay[a] - dy[a]) ^ 2 + (az[b] + dz[b] - az[a] - dz[a]) ^ 2)
+      local short = el[e] * L.fold - len
+      if short > 0 then
+        local c = short * L.foldCrunch
+        if maxCrunch and c > maxCrunch then c = maxCrunch end
+        if c > h.cr[a] then h.cr[a] = c h.on[a] = 1 h.changed[a] = true changed = changed + 1 end
+        if c > h.cr[b] then h.cr[b] = c h.on[b] = 1 h.changed[b] = true changed = changed + 1 end
+      end
+    end
+  end
+  return changed
 end
 
 return M

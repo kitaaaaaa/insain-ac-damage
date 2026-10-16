@@ -66,7 +66,7 @@ check(math.abs(d - math.min(H.storage.depth * H.storage.frontGive, H.storage.max
 local inward = true
 for i = 0, orig.n - 1 do
   local a, b = H.bodyMesh.vertices.raw[i].pos, orig.raw[i].pos
-  if a.z > b.z + 1e-4 then inward = false end  -- (0.1 mm: the hull blends neighbouring triangles)
+  if a.z > b.z + 1e-3 then inward = false end  -- (1 mm: the hull blends neighbouring triangles, and the springs pull)
 end
 check(inward, 'pushed in (-z)')
 -- normals bent beside the dent on the front face (a vertex on z = 2.2 off-centre)

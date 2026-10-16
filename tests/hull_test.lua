@@ -116,5 +116,43 @@ local n0 = hull.dent(h, 0.9, 0.55, 0, -1, 0, 0, 0.1, 0.45, 0.5, 0)
 hull.reset(h)
 local n2 = hull.dent(h, 0.9, 0.55, 0, -1, 0, 0, 0.1, 0.45, 0.5, 2, 0.35)
 check(n2 > n0, ('springs spread it: %d atoms vs %d'):format(n2, n0))
+-- spring limits (1nsane's): a deep, narrow push; without limits it pokes a spike, with them no edge stretches
+-- past 1.05 or squashes past 0.5, the middle stays as deep, and it drags more of the metal in
+local function edgeRange()
+  local lo, hi = 1e9, 0
+  for e = 0, h.edges - 1 do
+    local a, bb = h.ea[e], h.eb[e]
+    local len = math.sqrt((h.ax[bb] + h.dx[bb] - h.ax[a] - h.dx[a]) ^ 2 + (h.ay[bb] + h.dy[bb] - h.ay[a] - h.dy[a]) ^ 2 + (h.az[bb] + h.dz[bb] - h.az[a] - h.dz[a]) ^ 2) / h.el[e]
+    lo, hi = math.min(lo, len), math.max(hi, len)
+  end
+  return lo, hi
+end
+local function deepest() local d = 0 for n = 0, h.count - 1 do d = math.max(d, math.sqrt(h.dx[n] ^ 2 + h.dy[n] ^ 2 + h.dz[n] ^ 2)) end return d end
+local function count() local c = 0 for n = 0, h.count - 1 do if h.on[n] == 1 then c = c + 1 end end return c end
+local side = 7 * A  -- ring 7, the atom pointing +x (the left side, by the doors)
+hull.setLimits(h, nil)
+hull.reset(h)
+hull.dent(h, h.ax[side], h.ay[side], h.az[side], -1, 0, 0, 0.3, 0.2, 0.5, 0)
+local _, spike = edgeRange()
+local d0, c0 = deepest(), count()
+hull.setLimits(h, 1.05, 0.5, 0.9, 1)
+hull.reset(h)
+hull.dent(h, h.ax[side], h.ay[side], h.az[side], -1, 0, 0, 0.3, 0.2, 0.5, 0, 0.35, 0, 0.06)
+local lo, hi = edgeRange()
+check(spike > 1.2, ('without limits a narrow deep push stretches edges to %.2fx'):format(spike))
+check(hi <= 1.05 + 0.01 and lo >= 0.5 - 0.01, ('with limits the edges stay within 0.5..1.05 (%.3f..%.3f)'):format(lo, hi))
+check(math.abs(deepest() - d0) < 0.01, ('the middle of the dent holds its depth (%.3f vs %.3f)'):format(deepest(), d0))
+check(count() > c0 * 2, ('it drags the metal around it in: %d atoms vs %d'):format(count(), c0))
+-- squashed: the nose pushed straight back hard: edges along the car squash, the metal folds (crunch)
+hull.reset(h)
+local capMid = h.caps[1].middle
+hull.dent(h, h.ax[capMid], h.ay[capMid], h.az[capMid], 0, 0, 1, 0.5, 0.9, 0.5, 2, 0.35, 0, 0.06)
+local lo2 = edgeRange()
+local folded = 0
+for n = 0, h.count - 1 do if h.cr[n] > 0.005 then folded = folded + 1 end end
+check(lo2 >= 0.5 - 0.01, ('squashed no further than 0.5x: %.3f'):format(lo2))
+check(folded > 0, 'squashed metal folds: ' .. folded .. ' atoms with crunch')
+hull.setLimits(h, nil)
+
 print(fails == 0 and 'hull tests passed' or ('hull tests: ' .. fails .. ' failed'))
 os.exit(fails == 0 and 0 or 1)
