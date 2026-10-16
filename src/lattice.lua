@@ -79,19 +79,26 @@ function M.dent(l, px, py, pz, dirx, diry, dirz, depth, radius, maxOffset, sprin
   springs, stiffness, crunch = springs or 0, stiffness or 0.35, crunch or 0
   local nx, ny, nz = l.n[1], l.n[2], l.n[3]
   -- the region it can reach: the radius, plus a node per spring pass
-  local i0 = math.max(0, math.floor((px - radius - l.min[1]) / l.step[1]) - springs)
-  local i1 = math.min(nx - 1, math.ceil((px + radius - l.min[1]) / l.step[1]) + springs)
-  local j0 = math.max(0, math.floor((py - radius - l.min[2]) / l.step[2]) - springs)
-  local j1 = math.min(ny - 1, math.ceil((py + radius - l.min[2]) / l.step[2]) + springs)
-  local k0 = math.max(0, math.floor((pz - radius - l.min[3]) / l.step[3]) - springs)
-  local k1 = math.min(nz - 1, math.ceil((pz + radius - l.min[3]) / l.step[3]) + springs)
+  local reach = math.max(radius, 1.8 * depth)
+  local i0 = math.max(0, math.floor((px - reach - l.min[1]) / l.step[1]) - springs)
+  local i1 = math.min(nx - 1, math.ceil((px + reach - l.min[1]) / l.step[1]) + springs)
+  local j0 = math.max(0, math.floor((py - reach - l.min[2]) / l.step[2]) - springs)
+  local j1 = math.min(ny - 1, math.ceil((py + reach - l.min[2]) / l.step[2]) + springs)
+  local k0 = math.max(0, math.floor((pz - reach - l.min[3]) / l.step[3]) - springs)
+  local k1 = math.min(nz - 1, math.ceil((pz + reach - l.min[3]) / l.step[3]) + springs)
   -- the push (a scalar along dir) and the crunch, on the region's nodes
   local w, cw = {}, {}
+  -- the falloff: within `radius` across the push; along it (behind the point hit) at least 1.8 times the depth,
+  -- so a dent deeper than it's wide shoves the metal behind it back too (see hull.dent)
   local r2 = radius * radius
+  local q2 = reach * reach
   for k = k0, k1 do for j = j0, j1 do for i = i0, i1 do
     local x, y, z = M.nodePos(l, i, j, k)
-    local d2 = (x - px) ^ 2 + (y - py) ^ 2 + (z - pz) ^ 2
-    local f = d2 < r2 and 1 - d2 / r2 or 0
+    local ex, ey, ez = x - px, y - py, z - pz
+    local along = ex * dirx + ey * diry + ez * dirz
+    local across2 = ex * ex + ey * ey + ez * ez - along * along
+    local d2 = along > 0 and across2 / r2 + along * along / q2 or (ex * ex + ey * ey + ez * ez) / r2
+    local f = d2 < 1 and 1 - d2 or 0
     w[idx(l, i, j, k)] = depth * f * f
     cw[idx(l, i, j, k)] = crunch * f * f
   end end end

@@ -10,7 +10,7 @@ local hull = require('src/hull')
 local arrays = require('src/arrays')
 local noise = require('src/noise')
 
-local settings = ac.storage{
+local DEFAULTS = {
   depth = 0.12,        -- test dent: metres
   radius = 0.45,       -- test dent: metres
   atoms = 'hull',      -- 'hull' (car-shaped, on the body's outside, 1nsane's way) or 'box' (a lattice over its box)
@@ -52,11 +52,18 @@ local settings = ac.storage{
   crashDents = true,   -- dents from crashes
   crashScale = 1,
   bendTime = 0.3,      -- seconds the metal takes to bend in (0: at once)
+  repairRate = 25,     -- repairing slowly (held on a button): per cent of a wreck put right a second
   instantMs = 12,      -- work on a new dent the frame it happens (most of it shows at once)
   budgetMs = 4,        -- work per frame on dents (re-skinning) after that, first
   setupBudgetMs = 2,   -- then on reading cars
   sendBudget = 400000, -- vertices sent to AC a frame at most (alterVertices), the rest the next
 }
+local settings = ac.storage(DEFAULTS)
+
+-- Every setting back to its default (the ones marked "rebuild" apply to cars read after).
+local function resetSettings()
+  for k, v in pairs(DEFAULTS) do settings[k] = v end
+end
 
 local sim = ac.getSim()
 local PACK = 16777216  -- (mesh, vertex) pairs in one number: mesh * PACK + vertex
@@ -924,6 +931,32 @@ ac.onRelease(function() for _, body in pairs(cars) do restoreNow(body) end end)
 -- `dir`); 6 degrees at most in all. The parts bend in like the body (see show).
 local MAX_TILT = 0.1
 local function tiltOf(m) return math.acos(math.max(-1, math.min(1, m[1]))) end
+-- A wheel part tilted by P (3 x 3, its own space) about its hub: shown (eased over bendTime) and sent.
+local function applyTilt(mesh, P, bendTime)
+  mesh.tilt = P
+  local h, op = mesh.hubM, mesh.op
+  for v = 0, mesh.n - 1 do
+    local k6 = v * 6
+    local x, y, z = op[k6] - h.x, op[k6 + 1] - h.y, op[k6 + 2] - h.z
+    local nx, ny, nz = op[k6 + 3], op[k6 + 4], op[k6 + 5]
+    show(bendTime, mesh, v, h.x + P[1] * x + P[2] * y + P[3] * z, h.y + P[4] * x + P[5] * y + P[6] * z,
+      h.z + P[7] * x + P[8] * y + P[9] * z, P[1] * nx + P[2] * ny + P[3] * nz, P[4] * nx + P[5] * ny + P[6] * nz,
+      P[7] * nx + P[8] * ny + P[9] * nz)
+  end
+  sendQueue[#sendQueue + 1] = mesh
+end
+-- The same rotation, f of the way (0: none, 1: all of it).
+local function partRotation(M, f)
+  local angle = math.acos(math.max(-1, math.min(1, (M[1] + M[5] + M[9] - 1) / 2)))
+  if angle < 1e-6 or f <= 0 then return {1, 0, 0, 0, 1, 0, 0, 0, 1} end
+  local s2 = 2 * math.sin(angle)
+  local ux, uy, uz = (M[8] - M[6]) / s2, (M[3] - M[7]) / s2, (M[4] - M[2]) / s2
+  local a = angle * f
+  local c, sn = math.cos(a), math.sin(a)
+  return {c + ux * ux * (1 - c), ux * uy * (1 - c) - uz * sn, ux * uz * (1 - c) + uy * sn,
+    uy * ux * (1 - c) + uz * sn, c + uy * uy * (1 - c), uy * uz * (1 - c) - ux * sn,
+    uz * ux * (1 - c) - uy * sn, uz * uy * (1 - c) + ux * sn, c + uz * uz * (1 - c)}
+end
 local function bendWheel(body, k, dir, angle)
   if angle < 0.002 then return end
   for _, mesh in ipairs(body.wheelParts) do
@@ -949,17 +982,7 @@ local function bendWheel(body, k, dir, angle)
         P[r * 3 + q + 1] = R[r * 3 + 1] * M[q + 1] + R[r * 3 + 2] * M[q + 4] + R[r * 3 + 3] * M[q + 7]
       end end
       if tiltOf(P) <= MAX_TILT then
-        mesh.tilt = P
-        local h, op = mesh.hubM, mesh.op
-        for v = 0, mesh.n - 1 do
-          local k6 = v * 6
-          local x, y, z = op[k6] - h.x, op[k6 + 1] - h.y, op[k6 + 2] - h.z
-          local nx, ny, nz = op[k6 + 3], op[k6 + 4], op[k6 + 5]
-          show(settings.bendTime, mesh, v, h.x + P[1] * x + P[2] * y + P[3] * z, h.y + P[4] * x + P[5] * y + P[6] * z,
-            h.z + P[7] * x + P[8] * y + P[9] * z, P[1] * nx + P[2] * ny + P[3] * nz, P[4] * nx + P[5] * ny + P[6] * nz,
-            P[7] * nx + P[8] * ny + P[9] * nz)
-        end
-        sendQueue[#sendQueue + 1] = mesh
+        applyTilt(mesh, P, settings.bendTime)
         body.bentWheels = (body.bentWheels or 0) + 1
         trace('car %d: wheel %d bent %.1f degrees ("%s")', body.index, k, math.deg(tiltOf(P)), mesh.name)
       end
@@ -987,6 +1010,82 @@ local function repair(body)
   straightenWheels(body)
   body.instantNext = true  -- (a repair is at once)
   skin(body)
+end
+
+-- Repairing slowly (held on a button, as in Carmageddon): the damage goes back a step a frame, settings.repairRate
+-- per cent of a wreck a second. The atoms' offsets (and crunch) and every moved vertex go the same fraction of
+-- the way back each frame (a blend, cheap and smooth; the next dent starts from the shape this leaves), bent
+-- wheels straighten as much; at nothing left, an exact repair. Each step is told to other apps
+-- ('softdamage.repair': {car, repaired, damage}, per cent of a wreck), and one (Carmapeds) can stop it while
+-- there's no money for it ('softdamage.repairBlocked': {car, blocked}).
+local repairBlocked = {}
+if ac.onSharedEvent then
+  ac.onSharedEvent('softdamage.repairBlocked', function(ev)
+    if type(ev) == 'table' and type(ev.car) == 'number' then repairBlocked[ev.car] = ev.blocked == true end
+  end)
+end
+local repairButton = ac.ControlButton and ac.ControlButton('__APP_SOFTDAMAGE_REPAIR_SLOWLY') or nil
+
+-- How damaged a car is: per cent of a wreck (every atom in by 15 cm, scaled to the car), at most 100.
+local function damageOf(body)
+  local l = body.atoms
+  if not l then return 0 end
+  local sum = 0
+  for n = 0, l.count - 1 do sum = sum + math.sqrt(l.dx[n] * l.dx[n] + l.dy[n] * l.dy[n] + l.dz[n] * l.dz[n]) end
+  -- over the atoms on the car's outside: all of the hull's; the box lattice's on its outer faces (most of the
+  -- rest are inside the car, or in the air round it)
+  local outside = l.count
+  if body.kind == 'box' then
+    local nx, ny, nz = l.n[1], l.n[2], l.n[3]
+    outside = math.max(1, nx * ny * nz - math.max(0, nx - 2) * math.max(0, ny - 2) * math.max(0, nz - 2))
+  end
+  return math.min(100, 100 * sum / (outside * 0.15 * body.scale))
+end
+
+local function repairStep(body, dt)
+  if body.skinning then return end  -- (a dent still being worked out: next frame)
+  local D = damageOf(body)
+  local bent = false
+  for _, mesh in ipairs(body.wheelParts) do if tiltOf(mesh.tilt) > 1e-4 then bent = true end end
+  if D < 0.05 and not bent then
+    if body.dents > 0 then
+      if D > 0 and ac.broadcastSharedEvent then ac.broadcastSharedEvent('softdamage.repair', {car = body.index, repaired = D, damage = 0}) end
+      repair(body)
+    end
+    return
+  end
+  local k = D > 0.05 and math.min(1, settings.repairRate * dt / D) or math.min(1, settings.repairRate * dt / 5)
+  local keep = 1 - k
+  local l = body.atoms
+  for n = 0, l.count - 1 do
+    l.dx[n], l.dy[n], l.dz[n], l.cr[n] = l.dx[n] * keep, l.dy[n] * keep, l.dz[n] * keep, l.cr[n] * keep
+  end
+  for _, mesh in ipairs(body.meshes) do
+    if (mesh.movedCount or 0) > 0 and not mesh.moving then
+      stopBending(mesh)
+      local raw, op, moved = mesh.work.raw, mesh.op, mesh.moved
+      for v = 0, mesh.n - 1 do
+        if moved[v] == 1 then
+          local r, k6 = raw[v], v * 6
+          r.pos.x, r.pos.y, r.pos.z = op[k6] + (r.pos.x - op[k6]) * keep, op[k6 + 1] + (r.pos.y - op[k6 + 1]) * keep, op[k6 + 2] + (r.pos.z - op[k6 + 2]) * keep
+          r.normal.x = op[k6 + 3] + (r.normal.x - op[k6 + 3]) * keep
+          r.normal.y = op[k6 + 4] + (r.normal.y - op[k6 + 4]) * keep
+          r.normal.z = op[k6 + 5] + (r.normal.z - op[k6 + 5]) * keep
+        end
+      end
+      sendQueue[#sendQueue + 1] = mesh
+    end
+  end
+  for _, mesh in ipairs(body.wheelParts) do
+    if mesh.tilt[1] ~= 1 or mesh.tilt[5] ~= 1 then
+      stopBending(mesh)
+      applyTilt(mesh, partRotation(mesh.tilt, keep), 0)
+    end
+  end
+  if ac.broadcastSharedEvent then
+    ac.broadcastSharedEvent('softdamage.repair', {car = body.index, repaired = D * k, damage = D * keep})
+  end
+  body.repairing = true
 end
 
 -- A dent at a world position, pushed along a world direction.
@@ -1098,11 +1197,40 @@ local crashQueue = {}
 -- A crash's dent: r (world) from the car's middle, pushed along dir (world).
 local function crashDepth(speed) return (speed - MIN_HIT) * 0.025 * settings.crashScale + 0.01 end
 local function makeCrashDent(i, body, r, dir, speed, dvLen, along, from)
+  -- the push mostly level in the car's frame: a hard crash's speed change often has a big up or down part (AC
+  -- lifting or pressing the car), which aimed dents down onto the bonnet instead of into the bumper. Kept as it is
+  -- when it's mostly up or down (a roll onto the roof)
+  do
+    local Wb = body.node:getWorldTransformationRaw()
+    local dl = Wb:inverse():transformVector(dir)
+    if math.abs(dl.y) < 0.75 then
+      dl.y = dl.y * 0.3
+      dir = Wb:transformVector(dl):normalize()
+    end
+  end
+  -- where it hit, in the car's frame. Along the push, the motion can't tell (a push straight along the car says
+  -- nothing about how far along it landed): a ray from outside the car along the push finds the surface. Its
+  -- height isn't trusted either: in a hard hit the car pitches (the nose dives), which the motion read as a
+  -- contact high up, and the ray went over the bonnet into the windscreen. A level hit lands at bumper height
+  -- (a third of the way up the body)
   local mn, mx = body.min, body.max
   local W = body.node:getWorldTransformationRaw()
-  local centre = W:transformPoint(vec3((mn[1] + mx[1]) / 2, (mn[2] + mx[2]) / 2, (mn[3] + mx[3]) / 2))
-  local aim = centre + r
-  local hit = hitCar(body, aim - dir * 6, dir) or (aim - dir * 1.0)
+  local inv = W:inverse()
+  local rl, dl = inv:transformVector(r), inv:transformVector(dir):normalize()
+  local ax = (mn[1] + mx[1]) / 2 + rl.x
+  local ay = (mn[2] + mx[2]) / 2 + rl.y
+  local az = (mn[3] + mx[3]) / 2 + rl.z
+  if math.abs(dl.y) < 0.75 then ay = mn[2] + (mx[2] - mn[2]) * 0.35 end
+  local far = (mx[1] - mn[1]) + (mx[2] - mn[2]) + (mx[3] - mn[3])  -- (from well outside the car)
+  local ox, oy, oz = ax - dl.x * far, ay - dl.y * far, az - dl.z * far
+  local hit
+  local t = body.kind == 'hull' and hull.raycast(body.atoms, ox, oy, oz, dl.x, dl.y, dl.z) or nil
+  if t then
+    hit = W:transformPoint(vec3(ox + dl.x * t, oy + dl.y * t, oz + dl.z * t))
+  else
+    local from = W:transformPoint(vec3(ox, oy, oz))
+    hit = hitCar(body, from, dir) or W:transformPoint(vec3(ax, ay, az))
+  end
   -- (a hit still building: only what it adds to its dent so far)
   from = from or 0
   local depth = (math.min(settings.maxOffset, crashDepth(speed)) - (from > 0 and math.min(settings.maxOffset, crashDepth(from)) or 0)) * body.scale
@@ -1392,6 +1520,14 @@ function script.update(dt)
     if dist and dist >= 0 then dentWorld(body, ray.pos + ray.dir * dist, ray.dir, settings.depth * body.scale, settings.radius * body.scale) end
   end
   wasClick = click
+  -- repairing slowly, while the button's held: the car you're watching (not paused, not while it can't be paid)
+  local body = cars[i]
+  if repairButton and repairButton:down() and body and body.state == 'ready' and not sim.isPaused and not sim.isReplayActive
+    and not repairBlocked[i] then
+    repairStep(body, math.max(0, math.min(dt or 0, 0.1)))
+  elseif body then
+    body.repairing = false
+  end
   -- crashes: every car that's read, and (all cars on) every car in the session
   local tCrash = nowMs()
   if settings.crashDents and not sim.isPaused and not sim.isReplayActive then
@@ -1585,6 +1721,13 @@ function script.windowMain(dt)
     ui.sameLine()
   end
   if ui.button('Repair') then repair(body) end
+  if repairButton then
+    ui.text('Repair slowly (hold):')
+    ui.sameLine()
+    repairButton:control(vec2(-0.1, 0))
+    ui.text(('Damage: %.0f%%%s'):format(damageOf(body), body.repairing and ' (repairing)' or
+      (repairBlocked[body.index] and ' (no credits to repair)' or '')))
+  end
   ui.textWrapped('Or hold Ctrl and click on the car.')
   ui.separator()
   ui.text('Tests (one per AC launch if they crash):')
@@ -1609,6 +1752,8 @@ function script.windowMain(dt)
 end
 
 function script.windowSettings(dt)
+  if ui.button('Reset all settings to their defaults') then resetSettings() end
+  ui.separator()
   slider('frontGive', 'Front gives: %.0f%%', 20, 300, 100)
   slider('rearGive', 'Rear gives: %.0f%%', 20, 300, 100)
   slider('sideGive', 'Doors give (pushed sideways): %.0f%%', 20, 300, 100)
@@ -1637,6 +1782,7 @@ function script.windowSettings(dt)
     slider('hullRing', 'Hull rings every %.2f m (rebuild)', 0.15, 0.8)
     slider('hullAround', 'Hull atoms around: %.0f (rebuild)', 6, 24, 1, true)
   end
+  slider('repairRate', 'Repairing slowly: %.0f%% of a wreck a second', 5, 100)
   slider('bendTime', settings.bendTime < 0.01 and 'Metal bends in: at once' or 'Metal bends in over %.2f s', 0, 1)
   slider('instantMs', 'Work on a new dent, its first frame: %.0f ms', 2, 40)
   slider('budgetMs', 'Work per frame after that: %.1f ms', 1, 16)

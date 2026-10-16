@@ -468,12 +468,20 @@ function M.dent(h, px, py, pz, dirx, diry, dirz, depth, radius, maxOffset, sprin
   end
   nearest = sqrt(nearest)
   if radius < nearest * 1.25 then radius = nearest * 1.25 end
+  -- the falloff: within `radius` across the push; along it (behind the point hit) at least 1.8 times the depth,
+  -- so a dent deeper than it's wide shoves the metal behind it back too (an accordion), rather than the front
+  -- going in past what's behind it (a bumper ending up behind the bonnet's edge)
   local r2 = radius * radius
+  local reach = math.max(radius, 1.8 * depth)
+  local q2 = reach * reach
   local w, cw, region = {}, {}, {}
   for n = 0, h.count - 1 do
-    local d2 = (ax[n] + h.dx[n] - px) ^ 2 + (ay[n] + h.dy[n] - py) ^ 2 + (az[n] + h.dz[n] - pz) ^ 2
-    if d2 < r2 then
-      local f = 1 - d2 / r2
+    local ex, ey, ez = ax[n] + h.dx[n] - px, ay[n] + h.dy[n] - py, az[n] + h.dz[n] - pz
+    local along = ex * dirx + ey * diry + ez * dirz
+    local across2 = ex * ex + ey * ey + ez * ez - along * along
+    local d2 = along > 0 and across2 / r2 + along * along / q2 or (ex * ex + ey * ey + ez * ez) / r2
+    if d2 < 1 then
+      local f = 1 - d2
       w[n], cw[n] = depth * f * f, crunch * f * f
       region[#region + 1] = n
     end
@@ -601,6 +609,37 @@ function M.relax(h, pin, maxOffset, maxCrunch, dirx, diry, dirz)
     end
   end
   return changed
+end
+
+
+-- Where a ray (from o, along unit d; body space) first meets the hull as it is now: the distance along it, or
+-- nil. (Moller-Trumbore, over every triangle: a thousand or so.) The hull is closed, so a ray from outside stops
+-- at the car's outside: a bumper, not something behind a grille's openings.
+function M.raycast(h, ox, oy, oz, dx, dy, dz)
+  local ax, ay, az, ox_, oy_, oz_ = h.ax, h.ay, h.az, h.dx, h.dy, h.dz
+  local best
+  for t = 0, h.tris - 1 do
+    local a, b, c = h.ta[t], h.tb[t], h.tc[t]
+    local Ax, Ay, Az = ax[a] + ox_[a], ay[a] + oy_[a], az[a] + oz_[a]
+    local e1x, e1y, e1z = ax[b] + ox_[b] - Ax, ay[b] + oy_[b] - Ay, az[b] + oz_[b] - Az
+    local e2x, e2y, e2z = ax[c] + ox_[c] - Ax, ay[c] + oy_[c] - Ay, az[c] + oz_[c] - Az
+    local px, py, pz = dy * e2z - dz * e2y, dz * e2x - dx * e2z, dx * e2y - dy * e2x
+    local det = e1x * px + e1y * py + e1z * pz
+    if math.abs(det) > 1e-12 then
+      local inv = 1 / det
+      local sx, sy, sz = ox - Ax, oy - Ay, oz - Az
+      local u = (sx * px + sy * py + sz * pz) * inv
+      if u >= 0 and u <= 1 then
+        local qx, qy, qz = sy * e1z - sz * e1y, sz * e1x - sx * e1z, sx * e1y - sy * e1x
+        local v = (dx * qx + dy * qy + dz * qz) * inv
+        if v >= 0 and u + v <= 1 then
+          local dist = (e2x * qx + e2y * qy + e2z * qz) * inv
+          if dist > 0 and (not best or dist < best) then best = dist end
+        end
+      end
+    end
+  end
+  return best
 end
 
 return M

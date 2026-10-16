@@ -40,6 +40,10 @@ you. The top line of its window shows how far it's got. From then on:
   smooth dent; a big hit leaves a deep, crumpled one. Dents add up: hit the same corner twice and it gets worse.
 - **Other cars** dent in their crashes too, AI or other players online.
 - **Go back to the pits** (or reset the car) and it's repaired.
+- **Repair slowly**, as in Carmageddon: hold the **Repair slowly** button and the damage goes back a bit at a
+  time, dents easing out and bent wheels straightening; let go and it stops where it got to. Bind it to a key
+  or a controller button in the app's window (next to "Repair slowly (hold):"). It works on the car you're
+  watching. With the **Carmapeds** app running, repairs cost credits (see below).
 
 To see how it looks without crashing:
 
@@ -115,11 +119,23 @@ A second hit while it's still moving carries on from wherever it's got to.
   the car, so a model car half a metre long dents like a full-size one, not as if hit by something its own
   size.
 
+### Repairs and other apps (Carmapeds)
+
+While it repairs slowly, the app tells other Lua apps how much it put right, each frame, as a CSP shared event,
+`softdamage.repair`: `{car = index, repaired = per cent, damage = per cent left}`, in per cents of a wrecked
+car. An app can stop it for a car with `softdamage.repairBlocked`: `{car = index, blocked = true}` (and let
+it go on with `blocked = false`). Carmapeds uses these to charge credits for repairs, at C1's repair cost (30
+credits a per cent of damage, from C1's GENERAL.TXT), and, with its "repairs need credits" setting, to stop
+them when the money runs out.
+
 ### Finding crashes
 
 AC doesn't tell apps where a car was hit, so the app works it out from how the car moves. A hit square on the
 nose just slows the car; a hit at a rear corner also spins it. From how much the car's speed and spin change in
-an instant, the app works out where the push came from and how hard it was. Braking and cornering change the
+an instant, the app works out where the push came from and how hard it was. A push straight along the car doesn't
+say how far along it landed, and in a hard hit the car pitches, which would make the contact look high up, so
+for level hits the app looks for the car's outside from the push's side, at bumper height, on its hull: a hard
+head-on hit dents the front, not the windscreen. Braking and cornering change the
 speed far more gently than a crash does, so they don't count. Landing a jump is mostly the suspension's job, so
 it dents little.
 
@@ -139,7 +155,8 @@ The **A** to **E** test buttons check what works on a given PC and AC setup; you
 
 ## Settings
 
-Open them with the gear icon on the app's window. The useful ones:
+Open them with the gear icon on the app's window; **Reset all settings to their defaults** is at the top. The
+useful ones:
 
 **How much damage**
 
@@ -152,6 +169,7 @@ Open them with the gear icon on the app's window. The useful ones:
 | Crunch (in the main window), Crunch: biggest creases, Crunch: at most | How crumpled dented metal looks, how big the creases are, and how deep they can go. At 0% crunch, dents are smooth. |
 | Crunch style | **Creases** (sharp folds, like crumpled sheet metal) or **Hammered** (round bumps). |
 | Metal bends in over … s | How long a dent takes to bend in. 0: at once. |
+| Repairing slowly: …% of a wreck a second | How fast the Repair slowly button puts the car right. |
 | Spring passes | How far a dent spreads into the panel around it. |
 | Spring limits; Metal stretches, Squashes, Folds | How much the metal between atoms may stretch or squash, and when it folds. |
 
@@ -238,6 +256,8 @@ luajit tests/app_test.lua
 ATOMS=box luajit tests/app_test.lua
 luajit tests/cars_test.lua
 luajit tests/small_test.lua
+luajit tests/repair_test.lua
+luajit tests/crash_test.lua 3
 ```
 
 ## Credits

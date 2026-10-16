@@ -457,6 +457,11 @@ local same = true
 for _, m in ipairs(body2.meshes) do if m.name == 'body' then for i = 0, m.n - 1 do
   if math.abs(m.op[i * 6 + 2] - orig.raw[i].pos.z) > 1e-6 then same = false end end end end
 check(same, 'rebuild keeps the original vertices')
+-- settings back to their defaults
+H.storage.crashScale, H.storage.bendTime, H.storage.allCars = 2.5, 0, false
+H.buttons['Reset all settings to their defaults'] = true H.frame() H.buttons['Reset all settings to their defaults'] = nil
+check(H.storage.crashScale == 1 and H.storage.bendTime == 0.3 and H.storage.allCars == true and H.storage.atoms == 'hull',
+  'reset to defaults: ' .. tostring(H.storage.crashScale) .. ', ' .. tostring(H.storage.bendTime) .. ', ' .. tostring(H.storage.allCars))
 for i, b in pairs(H.state.cars) do check(not b.error, 'no errors in the background work: ' .. tostring(b.error)) end
 check(not body.error, 'no errors in the first body either: ' .. tostring(body.error))
 for _, l in ipairs(H.logs) do print(l) end

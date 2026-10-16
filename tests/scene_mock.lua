@@ -3,7 +3,7 @@
 -- turned and moved in the world. local H = require('tests/scene_mock')(opts); H.load(); H.frame()
 return function(opts)
   opts = opts or {}
-  local H = {logs = {}, altered = {}, buttons = {}, keys = {}}
+  local H = {logs = {}, altered = {}, buttons = {}, keys = {}, controls = {}, shared = {}, listeners = {}}
   -- vectors
   local V = {}
   V.__index = V
@@ -263,6 +263,13 @@ return function(opts)
     log = function(...) local t = {} for i = 1, select('#', ...) do t[i] = tostring(select(i, ...)) end H.logs[#H.logs + 1] = table.concat(t, ' ') end,
     findNodes = function(f) for _, n in ipairs(nodes) do if n.name == f then return ref({n}) end end return ref({}) end,
     forceDetailedCarLOD = function(i) H.detailed[i] = (H.detailed[i] or 0) + 1 end,
+    -- bindable buttons (held: H.controls[name] = true) and events between apps (every one kept in H.shared)
+    ControlButton = function(name) return {down = function() return H.controls[name] == true end, control = function() end} end,
+    broadcastSharedEvent = function(key, data)
+      H.shared[#H.shared + 1] = {key = key, data = data}
+      for _, fn in ipairs(H.listeners[key] or {}) do fn(data) end
+    end,
+    onSharedEvent = function(key, fn) H.listeners[key] = H.listeners[key] or {} table.insert(H.listeners[key], fn) end,
     onCarJumped = function(i, cb) H.jumps[i] = cb end,
     onRelease = function(cb) H.release = cb end,
     isKeyDown = function(k) return H.keys[k] == true end,
