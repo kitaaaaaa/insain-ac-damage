@@ -7,7 +7,14 @@ local H = require('tests/scene_mock')({n = 20})
 local orig = H.bodyMesh.vertices:clone()
 local origDoor = H.doorMesh.vertices:clone()
 H.load()
+for _ = 1, 30 do H.frame() end
+check(H.reads == 0 and H.state.cars[0] == nil, 'nothing read before the button')
+H.buttons['Read this car'] = true H.frame() H.buttons['Read this car'] = nil
 check(H.settle(), 'setup finishes')
+local f = io.open((os.getenv('TMPDIR') or '/tmp') .. '/softdamage_trace.txt')
+local traceText = f and f:read('*a') or ''
+if f then f:close() end
+check(traceText:find('app loaded', 1, true) and traceText:find('mesh 2/2: read', 1, true), 'trace written')
 local body = H.state.cars[0]
 check(body and body.state == 'ready', 'ready: ' .. tostring(body and body.state))
 check(body.vertices == orig.n + 3 and #body.meshes == 2, 'both meshes read: ' .. body.vertices)

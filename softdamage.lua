@@ -12,6 +12,7 @@ local settings = ac.storage{
   spacing = 0.35,      -- lattice: metres between atoms (applies on rebuild)
   springs = 2,         -- spring passes after each dent (0 = a dent stays exactly where it's pushed)
   maxOffset = 0.5,     -- how far an atom can be pushed in total
+  autoRead = false,    -- read the car being watched without pressing the button
   crashes = false,     -- dents from crashes (experimental)
   crashScale = 1,
   budgetMs = 4,        -- work per frame (setup and re-skinning)
@@ -19,6 +20,20 @@ local settings = ac.storage{
 
 local sim = ac.getSim()
 local function log(...) ac.log('[softdamage]', ...) end
+
+-- A trace of every call into CSP, one line at a time to a file closed after each line, so that if AC crashes
+-- the file's last line shows where (softdamage_trace.txt in this app's folder).
+local tracePath = __dirname .. '/softdamage_trace.txt'
+local function trace(fmt, ...)
+  local line = select('#', ...) > 0 and fmt:format(...) or fmt
+  log(line)
+  local ok, f = pcall(io.open, tracePath, 'a')
+  if ok and f then f:write(os.date('%H:%M:%S '), line, '\n') f:close() end
+end
+do
+  local ok, f = pcall(io.open, tracePath, 'w')
+  if ok and f then f:write(os.date('%H:%M:%S '), 'app loaded\n') f:close() end
+end
 local function nowMs() return os.preciseClock() * 1000 end
 
 -- ---------------------------------------------------------------------------------------------
@@ -44,18 +59,27 @@ local function setupCar(i)
   cars[i] = body
   local co = coroutine.create(function(t0)
     local started = nowMs()
+    trace('car %d: finding carRoot:%d', i, i)
     local root = ac.findNodes('carRoot:' .. i)
+    trace('car %d: %d root nodes; finding BODYTR', i, root:size())
     local bodyNode = root:findNodes('BODYTR')
+    trace('car %d: %d BODYTR nodes', i, bodyNode:size())
     if bodyNode:size() == 0 then body.state = 'no BODYTR node found' return end
     body.node = bodyNode
     local bodyWorld = bodyNode:getWorldTransformationRaw():clone()
     local invBody = bodyWorld:inverse()
+    trace('car %d: body transform read; finding meshes', i)
     local meshes = bodyNode:findMeshes('?')
     body.meshCount = meshes:size()
+    trace('car %d: %d meshes', i, body.meshCount)
     local min, max = {1e9, 1e9, 1e9}, {-1e9, -1e9, -1e9}
     for m = 1, meshes:size() do
       local ref = meshes:at(m)
+      local name = meshes:name(m)
+      body.reading = ('%d/%d %s'):format(m, body.meshCount, name)
+      trace('mesh %d/%d "%s": getVertices', m, body.meshCount, name)
       local verts = ref:getVertices()
+      trace('mesh %d/%d: %s', m, body.meshCount, verts and (verts:size() .. ' vertices') or 'no vertices')
       if verts and verts:size() > 0 and not ref:isPhysicsOnlyMesh() then
         local parentWorld = ref:getParent():getWorldTransformationRaw():clone()
         local invParent = parentWorld:inverse()
@@ -65,7 +89,7 @@ local function setupCar(i)
         local ex, ey, ez = toBody(vec3(1, 0, 0)) - o, toBody(vec3(0, 1, 0)) - o, toBody(vec3(0, 0, 1)) - o
         local function toMesh(v) return invParent:transformVector(bodyWorld:transformVector(v)) end
         local bx, by, bz = toMesh(vec3(1, 0, 0)), toMesh(vec3(0, 1, 0)), toMesh(vec3(0, 0, 1))
-        local mesh = {ref = ref, name = meshes:name(m), orig = verts, work = verts:clone(), n = verts:size(),
+        local mesh = {ref = ref, name = name, orig = verts, n = verts:size(),  -- work: a copy made at the first dent
           px = {}, py = {}, pz = {}, nx = {}, ny = {}, nz = {}, moved = {},
           toMesh = {bx.x, bx.y, bx.z, by.x, by.y, by.z, bz.x, bz.y, bz.z}}
         local raw = verts.raw
@@ -88,8 +112,9 @@ local function setupCar(i)
         end
         body.meshes[#body.meshes + 1] = mesh
         body.vertices = body.vertices + mesh.n
+        trace('mesh %d/%d: read', m, body.meshCount)
       end
-      t0 = budget(t0)
+      t0 = coroutine.yield()  -- one mesh per frame: the trace shows which one, should one crash
     end
     if #body.meshes == 0 then body.state = 'no meshes with vertices under BODYTR' return end
     for a = 1, 3 do min[a], max[a] = min[a] - 0.05, max[a] + 0.05 end
@@ -140,6 +165,7 @@ local function skin(body)
         if list then
           for e = 1, #list, 2 do
             local mesh, v = body.meshes[list[e]], list[e + 1]
+            if not mesh.work then mesh.work = mesh.orig:clone() end
             local raw, orig = mesh.work.raw, mesh.orig.raw
             local T = mesh.toMesh
             local ox, oy, oz, ax, ay, az, bx, by, bz, cx, cy, cz = lattice.sample(l, mesh.px[v], mesh.py[v], mesh.pz[v])
@@ -168,7 +194,11 @@ local function skin(body)
           end
         end
       end
-      for mesh in pairs(changed) do mesh.ref:alterVertices(mesh.work) end
+      for mesh in pairs(changed) do
+        if not mesh.sent then trace('alterVertices "%s" (%d vertices), first time', mesh.name, mesh.n) end
+        mesh.ref:alterVertices(mesh.work)
+        if not mesh.sent then trace('alterVertices "%s": done', mesh.name) mesh.sent = true end
+      end
       work = work + (nowMs() - t0)
       body.lastSkinMs, body.lastSkinSpan, body.lastSkinCount = work, nowMs() - started, count
     until not body.skinAgain
@@ -179,7 +209,7 @@ end
 
 -- Puts every mesh back as it was, now (not over frames).
 local function restoreNow(body)
-  for _, mesh in ipairs(body and body.meshes or {}) do mesh.ref:alterVertices(mesh.orig) end
+  for _, mesh in ipairs(body and body.meshes or {}) do if mesh.sent then mesh.ref:alterVertices(mesh.orig) end end
 end
 
 local function repair(body)
@@ -274,7 +304,7 @@ end
 local wasClick = false
 function script.update(dt)
   local i = sim.focusedCar
-  if i >= 0 and not cars[i] then setupCar(i) hookJumps(i) end
+  if settings.autoRead and i >= 0 and not cars[i] then setupCar(i) hookJumps(i) end
   -- Ctrl + left click on the car: a dent there, along the view
   local click = ac.isKeyDown(ac.KeyIndex.Control) and ac.isKeyDown(ac.KeyIndex.LeftButton)
   if click and not wasClick and cars[i] and cars[i].state == 'ready' then
@@ -296,8 +326,13 @@ end
 
 function script.windowMain(dt)
   local body = cars[sim.focusedCar]
-  if not body then ui.text('No car.') return end
-  ui.text(('Car %d: %s'):format(body.index, body.state))
+  if not body then
+    ui.textWrapped('Reads the body of the car you are watching (a trace of each step goes to softdamage_trace.txt in '
+      .. 'this app\'s folder).')
+    if ui.button('Read this car') and sim.focusedCar >= 0 then setupCar(sim.focusedCar) hookJumps(sim.focusedCar) end
+    return
+  end
+  ui.text(('Car %d: %s%s'):format(body.index, body.state, body.state == 'reading meshes' and body.reading and (' ' .. body.reading) or ''))
   if body.error then ui.textColored('Error: ' .. body.error, rgbm(1, 0.4, 0.3, 1)) end
   if body.lattice then
     local l = body.lattice
@@ -324,6 +359,7 @@ function script.windowSettings(dt)
   slider('maxOffset', 'Most an atom moves: %.2f m', 0.1, 1)
   slider('spacing', 'Atom spacing: %.2f m (rebuild)', 0.15, 0.8)
   slider('budgetMs', 'Work per frame: %.1f ms', 1, 16)
+  if ui.checkbox('Read the car I\'m watching without the button', settings.autoRead) then settings.autoRead = not settings.autoRead end
   if ui.checkbox('Dents from crashes (experimental)', settings.crashes) then settings.crashes = not settings.crashes end
   slider('crashScale', 'Crash dent scale: %.2f', 0.1, 3)
   if ui.button('Rebuild (re-read the car)') then
@@ -331,6 +367,7 @@ function script.windowSettings(dt)
     if cars[i] then cars[i].state = 'replaced' restoreNow(cars[i]) end
     for n = #jobs, 1, -1 do if jobs[n].body == cars[i] then table.remove(jobs, n) end end
     cars[i] = nil
+    if i >= 0 then setupCar(i) end
   end
 end
 

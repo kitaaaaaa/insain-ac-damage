@@ -119,7 +119,7 @@ return function(opts)
     table.sort(out, function(a, b) return a.name < b.name end)
     return ref(out)
   end
-  function Ref:getVertices() local m = self.items[1] return m and m.vertices:clone() end
+  function Ref:getVertices() local m = self.items[1] H.reads = H.reads + 1 return m and m.vertices:clone() end
   function Ref:alterVertices(v) local m = self.items[1] m.vertices = v:clone() H.altered[m.name] = (H.altered[m.name] or 0) + 1 return self end
   function Ref:getParent() return ref({self.items[1].parent}) end
   function Ref:getWorldTransformationRaw() return self.items[1].world end
@@ -183,7 +183,13 @@ return function(opts)
   }
   os.preciseClock = os.clock
   script = {}
-  function H.load() __softdamageTest = {} dofile('softdamage.lua') H.state = __softdamageTest end
+  H.reads = 0
+  function H.load()
+    __dirname = opts.dir or os.getenv('TMPDIR') or '/tmp'
+    __softdamageTest = {}
+    dofile('softdamage.lua')
+    H.state = __softdamageTest
+  end
   function H.frame(dt) script.update(dt or 1 / 60) script.windowMain(dt or 1 / 60) script.windowSettings(dt or 1 / 60) end
   function H.settle(max) for _ = 1, max or 2000 do H.frame() if #H.state.jobs == 0 then return true end end return false end
   return H

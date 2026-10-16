@@ -10,8 +10,11 @@ This first version is for finding out what works in the game, so it has test den
 ## Install
 
 Copy the `softdamage` folder to `assettocorsa\apps\lua\`, or drag the .zip file over Content Manager. In a
-session, open "Soft Body Damage" from the app bar. It reads the car you're watching when the app opens (and
-each car you switch to).
+session, open "Soft Body Damage" from the app bar and press **Read this car**: it reads the body of the car
+you're watching, a mesh per frame. (A setting reads each car you watch without the button.)
+
+Each step that calls into CSP is written to `softdamage_trace.txt` in the app's folder, a line at a time, so
+if AC crashes, the file's last line shows where.
 
 ## Trying it
 
