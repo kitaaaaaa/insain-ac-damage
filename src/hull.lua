@@ -7,6 +7,7 @@
 -- The hull: rings of atoms around the body's length (z), each atom as far out as the body goes in its
 -- direction from the ring's middle, and at each end, smaller rings down to a middle atom, following the nose or
 -- the tail. Plain Lua, no CSP calls: tests run it offline.
+local arrays = require('src/arrays')
 local M = {}
 
 local sqrt, floor, atan2, pi = math.sqrt, math.floor, math.atan2, math.pi
@@ -361,11 +362,11 @@ function M.bind(h, b, i, px, py, pz, nx, ny, nz)
   return best1, best2
 end
 
--- Arrays for n vertices' bindings.
+-- Arrays for n vertices' bindings (compact: FFI floats).
 function M.newBindings(n)
-  local b = {bt = {}, bw = {}, bu = {}, bv = {}, bh = {}, b1 = {}, b2 = {}, b3 = {}}
-  for i = 0, n * M.SLOTS - 1 do b.bt[i], b.bw[i], b.bu[i], b.bv[i], b.bh[i], b.b1[i], b.b2[i], b.b3[i] = -1, 0, 0, 0, 0, 0, 0, 0 end
-  return b
+  local k = n * M.SLOTS
+  return {bt = arrays.ints(k, -1), bw = arrays.floats(k), bu = arrays.floats(k), bv = arrays.floats(k), bh = arrays.floats(k),
+    b1 = arrays.floats(k), b2 = arrays.floats(k), b3 = arrays.floats(k)}
 end
 
 -- A new pass over the vertices: the triangles' shapes are worked out again when first needed.

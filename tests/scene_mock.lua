@@ -97,7 +97,7 @@ return function(opts)
   H.bodyWorld = H.rotY(0.5, 100, 2, -50)  -- the car turned and moved
   local doorLocal = H.rotY(math.pi / 2, 0.9, 0.6, 0.3)  -- a panel under a rotated child node
   local nodes = {}
-  local function node(name, world, parent) local n = {name = name, world = world, parent = parent, meshes = {}} nodes[name] = n return n end
+  local function node(name, world, parent) local n = {name = name, world = world, parent = parent, meshes = {}} nodes[#nodes + 1] = n return n end
   local root = node('carRoot:0', H.rotY(0))
   local body = node('BODYTR', H.bodyWorld, root)
   local door = node('DOOR', H.compose(H.bodyWorld, doorLocal), body)
@@ -131,6 +131,12 @@ return function(opts)
   local wheel = node('WHEEL_LF', H.compose(H.bodyWorld, H.rotY(0, 0.8, 0.3, 1.4)), root)
   H.wheelMesh = {name = 'tyre_lf', parent = wheel, vertices = buffer({{0, 0, 0, 1, 0, 0}, {0, 0.1, 0, 1, 0, 0}, {0, 0, 0.1, 1, 0, 0}})}
   wheel.meshes = {H.wheelMesh}
+  -- a second car (opts.cars = 2): the same box body, 30 m away, turned the other way
+  H.body2World = H.rotY(-1.0, 130, 2, -50)
+  local root2 = node('carRoot:1', H.rotY(0))
+  local body2 = node('BODYTR', H.body2World, root2)
+  H.body2Mesh = {name = 'body', parent = body2, vertices = buffer(boxSurface(opts.n or 20, 1.8, 1.2, 4.4))}
+  body2.meshes = {H.body2Mesh}
   local track = node('trackRoot:yes', H.rotY(0))
   H.trackMesh = {name = 'road', parent = track, vertices = buffer({{0, 0, 0, 0, 1, 0}, {1, 0, 0, 0, 1, 0}, {0, 0, 1, 0, 1, 0}})}
   track.meshes = {H.trackMesh}
@@ -143,11 +149,11 @@ return function(opts)
   function Ref:size() return #self.items end
   function Ref:at(i) return ref({self.items[i]}) end
   function Ref:name(i) return self.items[i or 1].name end
-  function Ref:findNodes(f) local out = {} for _, it in ipairs(self.items) do for _, n in pairs(nodes) do
+  function Ref:findNodes(f) local out = {} for _, it in ipairs(self.items) do for _, n in ipairs(nodes) do
     if n.name == f then local p = n.parent while p do if p == it then out[#out + 1] = n break end p = p.parent end end end end return ref(out) end
   function Ref:findMeshes(f)
     local out = {}
-    for _, it in ipairs(self.items) do for _, n in pairs(nodes) do
+    for _, it in ipairs(self.items) do for _, n in ipairs(nodes) do
       local p, under = n, false
       while p do if p == it then under = true break end p = p.parent end
       if under then for _, m in ipairs(n.meshes) do out[#out + 1] = m end end
@@ -191,7 +197,10 @@ return function(opts)
       end
     end
     -- slab test in the car's frame would be exact; the world AABB of a turned box is close enough to hit it
-    local inv = H.bodyWorld:inverse()
+    local bw = H.bodyWorld
+    local p = self.items[1] and self.items[1].parent
+    while p do if p.name == 'BODYTR' then bw = p.world break end p = p.parent end
+    local inv = bw:inverse()
     local o, d = inv:transformPoint(ray.pos), inv:transformVector(ray.dir)
     local bmin, bmax = {-0.9, 0, -2.2}, {0.9, 1.2, 2.2}
     local t0, t1 = 0, ray.length or 1e9
@@ -211,8 +220,14 @@ return function(opts)
   local car = {look = H.bodyWorld:transformVector(vec3(0, 0, 1)), up = vec3(0, 1, 0), velocity = vec3(), collisionDepth = 0,
     position = H.bodyWorld:transformPoint(vec3(0, 0.5, 0)),
     wheels = {[0] = {position = H.bodyWorld:transformPoint(vec3(0.8, 0.3, 1.4))}, {position = H.bodyWorld:transformPoint(vec3(-0.8, 0.3, 1.4))}}}
+  car.distanceToCamera, car.isConnected, car.aabbSize = 5, true, vec3(1.8, 1.2, 4.4)
   H.car = car
-  local sim = {focusedCar = 0, isPaused = false}
+  local car2 = {look = H.body2World:transformVector(vec3(0, 0, 1)), up = vec3(0, 1, 0), velocity = vec3(), collisionDepth = 0,
+    position = H.body2World:transformPoint(vec3(0, 0.5, 0)), distanceToCamera = 30, isConnected = true, aabbSize = vec3(1.8, 1.2, 4.4),
+    wheels = {[0] = {position = H.body2World:transformPoint(vec3(0.8, 0.3, 1.4))}, {position = H.body2World:transformPoint(vec3(-0.8, 0.3, 1.4))}}}
+  H.car2 = car2
+  H.detailed = {}
+  local sim = {focusedCar = 0, isPaused = false, carsCount = opts.cars or 1}
   H.sim = sim
   local storage = {}
   H.storage = storage
@@ -220,9 +235,10 @@ return function(opts)
   ac = {
     storage = function(d) for k, v in pairs(d) do if storage[k] == nil then storage[k] = v end end return storage end,
     getSim = function() return sim end,
-    getCar = function(i) return i == 0 and car or nil end,
+    getCar = function(i) if i == 0 then return car elseif i == 1 and (opts.cars or 1) > 1 then return car2 end return nil end,
     log = function(...) local t = {} for i = 1, select('#', ...) do t[i] = tostring(select(i, ...)) end H.logs[#H.logs + 1] = table.concat(t, ' ') end,
-    findNodes = function(f) return ref({nodes[f]}) end,
+    findNodes = function(f) for _, n in ipairs(nodes) do if n.name == f then return ref({n}) end end return ref({}) end,
+    forceDetailedCarLOD = function(i) H.detailed[i] = (H.detailed[i] or 0) + 1 end,
     onCarJumped = function(i, cb) H.jumps[i] = cb end,
     onRelease = function(cb) H.release = cb end,
     isKeyDown = function(k) return H.keys[k] == true end,

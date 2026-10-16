@@ -7,6 +7,7 @@
 -- (experimental) crashes; timings are shown in the window.
 local lattice = require('src/lattice')
 local hull = require('src/hull')
+local arrays = require('src/arrays')
 local noise = require('src/noise')
 
 local settings = ac.storage{
@@ -36,7 +37,11 @@ local settings = ac.storage{
   crunchSize = 0.25,   -- metres: the size of the biggest creases (finer ones on top)
   crunchStyle = 'creases', -- 'creases' (ridged noise: sharp folds, like crumpled metal) or 'hammered' (bumps)
   maxCrunch = 0.06,    -- metres: the most the crunch moves the metal
-  readWatched = true,  -- read the car being watched without pressing the button
+  readWatched = true,  -- read cars without pressing the button: the watched one, and (allCars) the others
+  allCars = true,      -- every car in the session within readDistance, not just the watched one
+  readDistance = 100,  -- metres from the camera
+  keepDetailed = true, -- damaged cars keep their detailed model (the one with the dents) up to detailedDistance
+  detailedDistance = 100,
   method = 'direct',   -- how dents are shown: 'direct' (the car's own meshes changed) or 'copy' (our own copies
                        -- of the meshes, the originals hidden: createMesh crashed AC in test C)
   outsideBody = true,  -- also dent the car's meshes outside BODYTR (lights, glass, trim), unless on moving parts
@@ -46,6 +51,7 @@ local settings = ac.storage{
 }
 
 local sim = ac.getSim()
+local PACK = 16777216  -- (mesh, vertex) pairs in one number: mesh * PACK + vertex
 local function log(...) ac.log('[softdamage]', ...) end
 
 -- A trace of every call into CSP, one line at a time to a file closed after each line, so that if AC crashes
@@ -192,7 +198,8 @@ local function setupCar(i)
         local function toMesh(v) return invParent:transformVector(bodyWorld:transformVector(v)) end
         local bx, by, bz = toMesh(vec3(1, 0, 0)), toMesh(vec3(0, 1, 0)), toMesh(vec3(0, 0, 1))
         local mesh = {ref = ref, name = name, orig = verts, n = verts:size(), interior = kind == 'interior',  -- work: a copy made at the first dent
-          px = {}, py = {}, pz = {}, nx = {}, ny = {}, nz = {}, moved = {},
+          px = arrays.floats(verts:size()), py = arrays.floats(verts:size()), pz = arrays.floats(verts:size()),
+          nx = arrays.floats(verts:size()), ny = arrays.floats(verts:size()), nz = arrays.floats(verts:size()), moved = {},
           toMesh = {bx.x, bx.y, bx.z, by.x, by.y, by.z, bz.x, bz.y, bz.z}}
         if item.outside then
           -- where its node sat on the body (its origin and two axes' ends), to tell if it moves after all
@@ -235,11 +242,10 @@ local function setupCar(i)
     body.noiseOffset = {math.random() * 200, math.random() * 200, math.random() * 200}  -- each car crumples its own way
     -- the vertices to redo when atoms move: per lattice cell, or per hull triangle (a list of mesh, vertex pairs)
     local users = {}
-    local function use(key, mi, v)
+    local function use(key, mi, v)  -- (mesh, vertex) packed in one number
       local list = users[key]
       if not list then list = {} users[key] = list end
-      list[#list + 1] = mi
-      list[#list + 1] = v
+      list[#list + 1] = mi * PACK + v
     end
     if settings.atoms == 'box' then
       body.kind = 'box'
@@ -288,7 +294,7 @@ local function setupCar(i)
     local REACH = 3  -- cells searched each way: 0.3 m (further than that, the body's own limit is the tighter one)
     for _, mesh in ipairs(body.meshes) do
       if not mesh.interior then
-        mesh.clear = {}
+        mesh.clear = arrays.floats(mesh.n)
         for v = 0, mesh.n - 1 do
           local x, y, z = mesh.px[v], mesh.py[v], mesh.pz[v]
           local best = 1e9
@@ -321,7 +327,7 @@ local function setupCar(i)
     log(('car %d: %d meshes with %d vertices, %d atoms (%s), set up in %.0f ms'):format(i, #body.meshes,
       body.vertices, body.atoms.count, body.kind, body.setupMs))
   end)
-  jobs[#jobs + 1] = {co = co, name = 'setup car ' .. i, body = body}
+  jobs[#jobs + 1] = {co = co, name = 'setup car ' .. i, body = body, setup = true}
   return body
 end
 
@@ -416,8 +422,9 @@ local function skin(body)
       for key in pairs(isHull and hull.takeChanged(l) or lattice.takeChanged(l)) do
         local list = body.users[key]
         if list then
-          for e = 1, #list, 2 do
-            local mi, v = list[e], list[e + 1]
+          for e = 1, #list do
+            local mi = math.floor(list[e] / PACK)
+            local v = list[e] - mi * PACK
             local mesh = body.meshes[mi]
             local s = seen[mi]
             if s[v] then mesh = nil else s[v] = true end
@@ -644,10 +651,36 @@ local function spin(c, car, dt)
   return (ax + bx + cx) * k, (ay + by + cy) * k, (az + bz + cz) * k
 end
 
+-- A crash's dent: r (world) from the car's middle, pushed along dir (world).
+local function crashDent(i, body, r, dir, speed, dvLen, along)
+  local mn, mx = body.min, body.max
+  local W = body.node:getWorldTransformationRaw()
+  local centre = W:transformPoint(vec3((mn[1] + mx[1]) / 2, (mn[2] + mx[2]) / 2, (mn[3] + mx[3]) / 2))
+  local aim = centre + r
+  local hit = hitCar(body, aim - dir * 6, dir) or (aim - dir * 1.0)
+  local depth = math.min(settings.maxOffset, (speed - MIN_HIT) * 0.025 * settings.crashScale + 0.01)
+  trace('crash: car %d, %.1f m/s at the contact (%.1f at the middle), %.2f m from the middle (along %.2f): dent %.3f m',
+    i, speed, dvLen, r:length(), along, depth)
+  dentWorld(body, hit, dir, depth, 0.35 + 0.025 * speed, speed / 12)
+  body.lastCrash = speed
+  body.crashes = (body.crashes or 0) + 1
+end
+
+-- Crashes of cars not read yet: kept (in the car's own axes) until the car is, then dented.
+local pending = {}
+local function carAxes(car)
+  local l, u = car.look, car.up
+  local sx, sy, sz = cross(u.x, u.y, u.z, l.x, l.y, l.z)
+  return vec3(sx, sy, sz):normalize(), u, l
+end
+
+local requestSetup  -- (below)
+
 local function updateCrash(i, dt)
   local car = ac.getCar(i)
   local body = cars[i]
-  if not car or not body or body.state ~= 'ready' or dt <= 0 then return end
+  if not car or dt <= 0 then return end
+  local ready = body and body.state == 'ready'
   local c = crash[i]
   if not c then
     c = {prevVel = vec3():set(car.velocity), prevPos = vec3():set(car.position), prevLook = vec3():set(car.look),
@@ -655,8 +688,15 @@ local function updateCrash(i, dt)
     crash[i] = c
     return
   end
-  local mn, mx = body.min, body.max
-  local halfLen = math.max(mx[3] - mn[3], mx[1] - mn[1]) / 2
+  -- the car's size: its body's box once read, AC's bounding box till then
+  local L, Wd, Hd
+  if ready then
+    L, Wd, Hd = body.max[3] - body.min[3], body.max[1] - body.min[1], body.max[2] - body.min[2]
+  else
+    local a = car.aabbSize
+    L, Wd, Hd = a and a.z > 0.5 and a.z or 4.5, a and a.x > 0.5 and a.x or 1.9, a and a.y > 0.3 and a.y or 1.4
+  end
+  local halfLen = math.max(L, Wd) / 2
   c.cool = math.max(0, c.cool - dt)
   local teleported = car.position:distanceSquared(c.prevPos) > 25
   local wx, wy, wz = spin(c, car, dt)
@@ -683,21 +723,28 @@ local function updateCrash(i, dt)
       end
       local dv2 = dvx * dvx + dvy * dvy + dvz * dvz
       local dwx, dwy, dwz = wx - c.wBefore[1], wy - c.wBefore[2], wz - c.wBefore[3]
-      -- where: r = k^2 (dv x dw) / |dv|^2, kept inside the body's box (in the body's own frame)
-      local W = body.node:getWorldTransformationRaw()
-      local inv = W:inverse()
-      local L, Wd, Hd = mx[3] - mn[3], mx[1] - mn[1], mx[2] - mn[2]
+      -- where: r = k^2 (dv x dw) / |dv|^2, kept inside the car's box (in its own frame: the body's once read,
+      -- the car's axes till then)
       local k2 = (L * L + Wd * Wd) / 12
       local rx, ry, rz = 0, 0, 0
       if dv2 > 1e-6 then
         rx, ry, rz = cross(dvx, dvy, dvz, dwx, dwy, dwz)
         rx, ry, rz = rx * k2 / dv2, ry * k2 / dv2, rz * k2 / dv2
       end
-      local rl = inv:transformVector(vec3(rx, ry, rz))
+      local W, inv, ax, ay, az
+      local rl
+      if ready then
+        W = body.node:getWorldTransformationRaw()
+        inv = W:inverse()
+        rl = inv:transformVector(vec3(rx, ry, rz))
+      else
+        ax, ay, az = carAxes(car)
+        rl = vec3(rx * ax.x + ry * ax.y + rz * ax.z, rx * ay.x + ry * ay.y + rz * ay.z, rx * az.x + ry * az.y + rz * az.z)
+      end
       rl.x = math.max(-Wd / 2, math.min(Wd / 2, rl.x))
       rl.y = math.max(-Hd / 2, math.min(Hd / 2, rl.y))
       rl.z = math.max(-L / 2, math.min(L / 2, rl.z))
-      local r = W:transformVector(rl)
+      local r = ready and W:transformVector(rl) or (ax * rl.x + ay * rl.y + az * rl.z)
       -- the change at the contact point: dv + dw x r (at most three times the middle's: noise in the spin)
       local px, py, pz = cross(dwx, dwy, dwz, r.x, r.y, r.z)
       local dvLen = math.sqrt(dv2)
@@ -705,15 +752,16 @@ local function updateCrash(i, dt)
       if speed > MIN_HIT and dvLen > 1e-3 then
         c.cool = COOLDOWN
         local dir = vec3(dvx, dvy, dvz):normalize()
-        local centre = W:transformPoint(vec3((mn[1] + mx[1]) / 2, (mn[2] + mx[2]) / 2, (mn[3] + mx[3]) / 2))
-        local aim = centre + r
-        local hit = hitCar(body, aim - dir * 6, dir) or (aim - dir * 1.0)
-        local depth = math.min(settings.maxOffset, (speed - MIN_HIT) * 0.025 * settings.crashScale + 0.01)
-        trace('crash: car %d, %.1f m/s at the contact (%.1f at the middle), %.2f m from the middle (along %.2f): dent %.3f m',
-          i, speed, dvLen, math.sqrt(rl.x ^ 2 + rl.y ^ 2 + rl.z ^ 2), rl.z, depth)
-        dentWorld(body, hit, dir, depth, 0.35 + 0.025 * speed, speed / 12)
-        body.lastCrash = speed
-        body.crashes = (body.crashes or 0) + 1
+        if ready then
+          crashDent(i, body, r, dir, speed, dvLen, rl.z)
+        else
+          -- not read yet: kept in the car's axes, and the car read first of all
+          local p = pending[i] or {}
+          pending[i] = p
+          p[#p + 1] = {r = {rl.x, rl.y, rl.z}, dir = {dir:dot(ax), dir:dot(ay), dir:dot(az)}, speed = speed, dvLen = dvLen}
+          trace('crash: car %d (not read yet), %.1f m/s: reading it to dent it', i, speed)
+          requestSetup(i, true)
+        end
       end
     end
   end
@@ -722,6 +770,24 @@ local function updateCrash(i, dt)
   c.prevPos:set(car.position)
   c.prevLook:set(car.look)
   c.prevUp:set(car.up)
+end
+
+-- Crashes kept for cars now read: dented, in the car's axes as they are now.
+local function applyPending()
+  for i, list in pairs(pending) do
+    local body, car = cars[i], ac.getCar(i)
+    if body and body.state == 'ready' and car then
+      local ax, ay, az = carAxes(car)
+      for _, p in ipairs(list) do
+        local r = ax * p.r[1] + ay * p.r[2] + az * p.r[3]
+        local dir = (ax * p.dir[1] + ay * p.dir[2] + az * p.dir[3]):normalize()
+        crashDent(i, body, r, dir, p.speed, p.dvLen, p.r[3])
+      end
+      pending[i] = nil
+    elseif not body or (body.state ~= 'ready' and body.state ~= 'reading meshes') then
+      if body then pending[i] = nil end  -- couldn't be read: dropped
+    end
+  end
 end
 
 -- Repairs: going to the pits or being reset (ac.onCarJumped) mends the body.
@@ -741,9 +807,64 @@ local function sendQueued()
   for _, mesh in ipairs(q) do if not seen[mesh] then seen[mesh] = true send(mesh) end end
 end
 
+-- Which cars are read: the watched one, and (a setting) every other car within readDistance of the camera, the
+-- nearest first, one at a time. A car read and still undamaged that's gone further than one and a half times
+-- that is let go again (memory); a damaged one stays, and keeps its detailed model (AC shows simpler models of
+-- far cars, which don't have the dents) up to detailedDistance.
+local function readingNow()
+  for _, j in ipairs(jobs) do if j.setup then return j.body.index end end
+  return nil
+end
+
+function requestSetup(i, urgent)
+  if cars[i] then return end
+  local body = setupCar(i)
+  hookJumps(i)
+  if urgent and #jobs > 1 then
+    -- next after whatever runs now
+    local job = table.remove(jobs)
+    table.insert(jobs, 2, job)
+  end
+  return body
+end
+
+local function letGo(i)
+  local body = cars[i]
+  if not body then return end
+  restoreNow(body)
+  body.state = 'let go'
+  for n = #jobs, 1, -1 do if jobs[n].body == body then table.remove(jobs, n) end end
+  cars[i] = nil
+  trace('car %d: let go (far away, undamaged)', i)
+end
+
+local function damaged(body) return body.dents > 0 end
+
+local function manageCars()
+  local focused = sim.focusedCar
+  if focused >= 0 and not cars[focused] then requestSetup(focused, true) end
+  if not settings.allCars then return end
+  local far = settings.readDistance * 1.5
+  local nearest, nearestD
+  for i = 0, (sim.carsCount or 1) - 1 do
+    local car = ac.getCar(i)
+    if car and car.isConnected ~= false then
+      local d = car.distanceToCamera or 0
+      local body = cars[i]
+      if not body and d < settings.readDistance and (not nearestD or d < nearestD) then nearest, nearestD = i, d end
+      if body and i ~= focused and body.state == 'ready' and not damaged(body) and not pending[i] and d > far then letGo(i) end
+      if body and body.state == 'ready' and damaged(body) and settings.keepDetailed and d < settings.detailedDistance
+        and ac.forceDetailedCarLOD then
+        ac.forceDetailedCarLOD(i)
+      end
+    end
+  end
+  if nearest and not readingNow() then requestSetup(nearest) end
+end
+
 function script.update(dt)
   local i = sim.focusedCar
-  if settings.readWatched and i >= 0 and not cars[i] then setupCar(i) hookJumps(i) end
+  if settings.readWatched then manageCars() end
   -- Ctrl + left click on the car: a dent there, along the view
   local click = ac.isKeyDown(ac.KeyIndex.Control) and ac.isKeyDown(ac.KeyIndex.LeftButton)
   if click and not wasClick and cars[i] and cars[i].state == 'ready' then
@@ -753,13 +874,21 @@ function script.update(dt)
     if dist and dist >= 0 then dentWorld(body, ray.pos + ray.dir * dist, ray.dir, settings.depth, settings.radius) end
   end
   wasClick = click
-  -- every car that's been read
+  -- crashes: every car that's read, and (all cars on) every car in the session
   if settings.crashDents and not sim.isPaused and not sim.isReplayActive then
-    for ci in pairs(cars) do updateCrash(ci, dt) end
+    if settings.readWatched and settings.allCars then
+      for ci = 0, (sim.carsCount or 1) - 1 do
+        local car = ac.getCar(ci)
+        if car and car.isConnected ~= false then updateCrash(ci, dt) end
+      end
+    else
+      for ci in pairs(cars) do if cars[ci].state == 'ready' then updateCrash(ci, dt) end end
+    end
   else
     -- not watching: forget the last frame, so the next one isn't compared with a stale one (a false crash)
     for ci in pairs(crash) do crash[ci] = nil end
   end
+  applyPending()
   runJobs()
   sendQueued()
 end
@@ -882,6 +1011,10 @@ end
 
 local showParts = false
 function script.windowMain(dt)
+  local read, dented = 0, 0
+  for _, b in pairs(cars) do if b.state == 'ready' then read = read + 1 if b.dents > 0 then dented = dented + 1 end end end
+  local now = readingNow()
+  ui.text(('Cars read: %d (%d dented)%s'):format(read, dented, now and (', reading car ' .. now) or ''))
   local body = cars[sim.focusedCar]
   if not body then
     ui.textWrapped('Reads the body of the car you are watching (a trace of each step goes to softdamage_trace.txt in '
@@ -973,7 +1106,13 @@ function script.windowSettings(dt)
     slider('hullAround', 'Hull atoms around: %.0f (rebuild)', 6, 24, 1, true)
   end
   slider('budgetMs', 'Work per frame: %.1f ms', 1, 16)
-  if ui.checkbox('Read the car I\'m watching without the button', settings.readWatched) then settings.readWatched = not settings.readWatched end
+  if ui.checkbox('Read cars without the button', settings.readWatched) then settings.readWatched = not settings.readWatched end
+  if ui.checkbox('Every car in the session (not just the one I\'m watching)', settings.allCars) then settings.allCars = not settings.allCars end
+  if settings.allCars then
+    slider('readDistance', 'Read cars within %.0f m of the camera', 20, 500)
+  end
+  if ui.checkbox('Damaged cars keep their detailed model', settings.keepDetailed) then settings.keepDetailed = not settings.keepDetailed end
+  if settings.keepDetailed then slider('detailedDistance', '... up to %.0f m', 20, 500) end
   if ui.checkbox('Dent copies of the meshes (createMesh crashed AC in test C)', settings.method == 'copy') then
     settings.method = settings.method == 'copy' and 'direct' or 'copy'
   end

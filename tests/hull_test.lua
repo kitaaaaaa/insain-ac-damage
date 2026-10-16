@@ -58,7 +58,7 @@ for v = 0, mesh.n - 1 do
     end
   end
 end
-check(worst < 1e-9, ('bindings rebuild their vertices: off by %.2g'):format(worst))
+check(worst < 1e-6, ('bindings rebuild their vertices (stored as floats): off by %.2g m'):format(worst))
 check(outside == 0, 'vertices pinned near their triangles (in concave spots, a little off its edges): ' .. outside .. ' far off')
 -- at rest nothing moves
 local any = false

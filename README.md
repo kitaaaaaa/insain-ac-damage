@@ -6,6 +6,26 @@ vertex of the body is pinned to the hull's triangles and follows them. 1nsane's 
 by hand; here the hull is built from the car's own meshes. Visual only: AC's physics and collisions don't
 change.
 
+## New in 0.7.0: every car in the session
+
+- **Which cars**: the one you're watching, and every other car within 100 m of the camera (a setting), read
+  one at a time, the nearest first, in the background. The window shows how many are read and dented.
+- **Crashes on every car**, read or not: a car hit before it's read is read straight away and then dented
+  where it was hit (the hit is kept in the car's own axes till then).
+- **Memory**: the per-vertex data is in compact arrays now (about 150 bytes a vertex, from about 430), so a
+  detailed car takes some 15-20 MB, not 50. An undamaged car that goes further than 150 m from the camera is let
+  go (read again if it comes back); a damaged one is kept.
+- **Far away**: AC shows simpler models of far cars (LODs), and those don't have the dents: the dents are on the
+  car's main model. So a damaged car keeps its main model up to 100 m from the camera (a setting; it costs a
+  little drawing). Past that it shows AC's simpler model, without its dents.
+- Settings: **Every car in the session** (off: just the watched one, as before), how far to read, and the
+  detailed-model distance.
+
+Checked offline (two cars: tests/cars_test.lua): both read, a crash dents the car that crashed and not the
+other, a dented car keeps its main model near and not far, an undamaged far car is let go, and a crash on a car
+not read yet reads it and dents its front. Not tested in AC yet: how a full grid feels (setup runs one car at a
+time in the background), and AI and online cars (a car AC reports as not connected is skipped).
+
 ## New in 0.6.0: spring limits (1nsane's)
 
 1nsane's physics files give every spring between atoms its length at rest and how far it may squash and
@@ -177,6 +197,7 @@ luajit tests/lattice_test.lua
 luajit tests/noise_test.lua
 luajit tests/app_test.lua
 ATOMS=box luajit tests/app_test.lua
+luajit tests/cars_test.lua
 ```
 
 `tests/scene_mock.lua` mocks the CSP calls the app makes, with a fake car (a turned, moved box body and a panel
