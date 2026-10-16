@@ -1,9 +1,35 @@
 # Soft Body Damage for Assetto Corsa (prototype)
 
-A Custom Shaders Patch Lua app that dents cars visually, on any car, with no per-car setup. In the spirit of
-the "atoms" of 1nsane and Live for Speed's visual damage: a lattice of atoms covers the car's body, dents push
-atoms in, springs between them spread a dent, and every vertex of the body follows the atoms around it.
-Visual only: AC's physics and collisions don't change.
+A Custom Shaders Patch Lua app that dents cars visually, on any car, with no per-car setup. The way 1nsane did
+it: a hull of "atoms" wraps the car's body, dents push atoms in, springs between them spread a dent, and every
+vertex of the body is pinned to the hull's triangles and follows them. 1nsane's cars came with their hulls made
+by hand; here the hull is built from the car's own meshes. Visual only: AC's physics and collisions don't
+change.
+
+## New in 0.5.0: the car-shaped hull
+
+Until 0.4.0 the atoms were a box lattice over the car (atoms in the air around it and inside it). Now they're a
+hull on the body's outside, shaped like the car, as in 1nsane (from reverse-engineering its files: each vertex
+sits at `a + u(b - a) + v(c - a) + h (b - a) x (c - a)` for a triangle of atoms a, b, c; the game stored u, v, h
+per vertex, this app works them out when it reads the car).
+
+- **The hull**: rings of atoms around the car every 0.3 m along its length, 20 around each, each as far out as
+  the body goes in its direction, pushed out until the hull goes around every vertex. At each end, smaller
+  rings down to a middle atom, each as far forward (back) as the body goes at its spot, so the hull follows the
+  nose and the tail.
+- **Pinning**: each vertex goes to the hull triangle over it (and a second one beside it, at a seam, blended),
+  with its place on the triangle and its height off it. A dent moves atoms; the triangles move, bend and
+  stretch, and the vertices with them. Normals turn with their triangles.
+- **Why**: atoms are on the metal, so a hit pushes the side that was hit and only that (a box lattice's atoms
+  also sit inside the car and on the far side of a narrow part), and dents spread along the body's surface
+  (springs follow the hull's edges) rather than through the air.
+- The box lattice is still there (settings: **Atoms**, then **Rebuild**) to compare.
+- The window shows the hull's atoms and triangles.
+
+Checked offline (the tests, and on the body of a car model from 1nsane): moving the whole hull moves every
+vertex exactly with it, dents stay on the side hit, nothing on the dented side goes out more than 2 mm, and no
+vertex moves more than the dent. Pinning a 120,000-vertex body is about half a second of work, spread over
+frames while the car is read. Not tested in AC yet.
 
 This first version is for finding out what works in the game, so it has test dents and shows timings.
 
@@ -81,16 +107,22 @@ mesh's vertices comes from `getVertices()` again.
 
 - The meshes under the car's `BODYTR` node (the car's body, not its wheels and suspension) are read once
   (`getVertices`). Each vertex is put in the body's own coordinates through its node's transform.
-- A lattice of atoms covers the body's box, one about every 0.35 m. A dent pushes the atoms near it along the
-  hit, by up to the depth asked with a smooth falloff; spring passes spread that dent to the atoms around it.
-  An atom keeps its offset (the metal stays bent), up to a limit.
-- Each vertex moves by the atoms' offset where it sits (trilinear interpolation, a free-form deformation), and
-  its normal turns with the lattice's local stretch, so dents catch the light. Only the vertices near atoms
-  that moved are redone, a few milliseconds of work per frame, and only changed meshes are sent back
+- The hull is built around them and each vertex pinned to it (see above); or, with the box lattice, atoms
+  every 0.35 m over the body's box.
+- A dent pushes the atoms near it (at least the nearest) along the hit, by up to the depth asked with a smooth
+  falloff; spring passes spread that dent to the atoms around it (along the hull's edges). An atom keeps its
+  offset (the metal stays bent), up to a limit.
+- Each vertex moves with its triangles (the hull) or by the atoms' offset where it sits (the lattice: trilinear
+  interpolation, a free-form deformation), and its normal turns with them, so dents catch the light. Only the
+  vertices on triangles (in cells) next to atoms that moved are redone, and only changed meshes are sent back
   (`alterVertices`).
 
 ## What to look for (not known yet)
 
+- 0.5.0: do dents look better or worse than 0.4.0's (Atoms: Box lattice, then Rebuild, to compare)? Setup time
+  on a detailed car (shown in the window). Anything poking out or swinging oddly when a dent is near a concave
+  spot (where the bonnet meets the windscreen, around the wheel arches): those vertices sit under the hull, not
+  on it.
 - Does the car dent at all? (Is `alterVertices` allowed on car meshes from an app?)
 - Do dents land where they should, the right way (front button: the front pushed in)?
 - Setup and re-skin times on a detailed car, and any stutter.
@@ -105,9 +137,11 @@ mesh's vertices comes from `getVertices()` again.
 From this folder, with LuaJIT:
 
 ```
+luajit tests/hull_test.lua
 luajit tests/lattice_test.lua
 luajit tests/noise_test.lua
 luajit tests/app_test.lua
+ATOMS=box luajit tests/app_test.lua
 ```
 
 `tests/scene_mock.lua` mocks the CSP calls the app makes, with a fake car (a turned, moved box body and a panel

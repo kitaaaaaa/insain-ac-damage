@@ -1,10 +1,12 @@
 -- The app (softdamage.lua) against the scene mock: setup, dents from each source, repair, rebuild.
--- luajit tests/app_test.lua   (from the app folder)
+-- luajit tests/app_test.lua   (from the app folder; ATOMS=box for the box lattice, the hull by default)
 package.path = './?.lua;' .. package.path
 local fails = 0
 local function check(c, msg) if not c then fails = fails + 1 print('FAIL: ' .. msg) end end
 local H = require('tests/scene_mock')({n = 20})
 H.storage.readWatched = false  -- (on by default; this test presses the button)
+H.storage.atoms = os.getenv('ATOMS') or 'hull'
+print('atoms: ' .. H.storage.atoms)
 local orig = H.bodyMesh.vertices:clone()
 local origDoor = H.doorMesh.vertices:clone()
 H.load()
@@ -59,7 +61,7 @@ check(math.abs(d - math.min(H.storage.depth * H.storage.frontGive, H.storage.max
 local inward = true
 for i = 0, orig.n - 1 do
   local a, b = H.bodyMesh.vertices.raw[i].pos, orig.raw[i].pos
-  if math.abs(a.z - b.z) > 1e-9 and a.z > b.z then inward = false end
+  if a.z > b.z + 1e-4 then inward = false end  -- (0.1 mm: the hull blends neighbouring triangles)
 end
 check(inward, 'pushed in (-z)')
 -- normals bent beside the dent on the front face (a vertex on z = 2.2 off-centre)
@@ -216,7 +218,7 @@ local function hitAt(speed)
   hit(0)
   drive(0, 30)
   H.settle()
-  local l, maxOff, maxCr = body.lattice, 0, 0
+  local l, maxOff, maxCr = body.atoms, 0, 0
   for i = 0, l.count - 1 do
     maxOff = math.max(maxOff, math.sqrt(l.dx[i] ^ 2 + l.dy[i] ^ 2 + l.dz[i] ^ 2))
     maxCr = math.max(maxCr, l.cr[i])

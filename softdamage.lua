@@ -1,16 +1,21 @@
 -- Soft Body Damage (prototype): visual dents on any car, no per-car setup. The car's body meshes (under its
--- BODYTR node) follow a lattice of "atoms" over the body; dents push atoms in, springs between them spread it,
--- and every vertex moves with the lattice where it sits (src/lattice.lua). Visual only: AC's physics and
--- collisions don't change.
+-- BODYTR node) follow "atoms": by default a car-shaped hull of them, built from the body, with every vertex
+-- pinned to the nearest hull triangles the way 1nsane did it (src/hull.lua); or a box lattice of them (a
+-- free-form deformation, src/lattice.lua). Dents push atoms in, springs between them spread it. Visual only:
+-- AC's physics and collisions don't change.
 -- This first version is for finding out what works in game: dents from buttons, Ctrl+click on the car, and
 -- (experimental) crashes; timings are shown in the window.
 local lattice = require('src/lattice')
+local hull = require('src/hull')
 local noise = require('src/noise')
 
 local settings = ac.storage{
   depth = 0.12,        -- test dent: metres
   radius = 0.45,       -- test dent: metres
-  spacing = 0.35,      -- lattice: metres between atoms (applies on rebuild)
+  atoms = 'hull',      -- 'hull' (car-shaped, on the body's outside, 1nsane's way) or 'box' (a lattice over its box)
+  hullRing = 0.3,      -- hull: metres between rings of atoms along the car (applies on rebuild)
+  hullAround = 20,     -- hull: atoms around each ring (applies on rebuild)
+  spacing = 0.35,      -- box lattice: metres between atoms (applies on rebuild)
   springs = 2,         -- spring passes after each dent (0 = a dent stays exactly where it's pushed)
   maxOffset = 0.5,     -- how far an atom can be pushed in total
   maxBodyIn = 0.1524,  -- the most any spot of the body moves (half a foot)
@@ -158,21 +163,41 @@ local function setupCar(i)
     if #body.meshes == 0 then body.state = 'no meshes with vertices under BODYTR' return end
     for a = 1, 3 do min[a], max[a] = min[a] - 0.05, max[a] + 0.05 end
     body.min, body.max = min, max
-    body.lattice = lattice.new(min, max, settings.spacing)
     body.noiseOffset = {math.random() * 200, math.random() * 200, math.random() * 200}  -- each car crumples its own way
-    -- every vertex in its lattice cell, so a dent only revisits the vertices near the atoms that moved
-    local cells = {}
-    for mi, mesh in ipairs(body.meshes) do
-      for v = 0, mesh.n - 1 do
-        local c = lattice.cellOf(body.lattice, mesh.px[v], mesh.py[v], mesh.pz[v])
-        local list = cells[c]
-        if not list then list = {} cells[c] = list end
-        list[#list + 1] = mi
-        list[#list + 1] = v
-        if v % 4000 == 0 then t0 = budget(t0) end
+    -- the vertices to redo when atoms move: per lattice cell, or per hull triangle (a list of mesh, vertex pairs)
+    local users = {}
+    local function use(key, mi, v)
+      local list = users[key]
+      if not list then list = {} users[key] = list end
+      list[#list + 1] = mi
+      list[#list + 1] = v
+    end
+    if settings.atoms == 'box' then
+      body.kind = 'box'
+      body.atoms = lattice.new(min, max, settings.spacing)
+      for mi, mesh in ipairs(body.meshes) do
+        for v = 0, mesh.n - 1 do
+          use(lattice.cellOf(body.atoms, mesh.px[v], mesh.py[v], mesh.pz[v]), mi, v)
+          if v % 4000 == 0 then t0 = budget(t0) end
+        end
+      end
+    else
+      body.kind = 'hull'
+      trace('car %d: building the hull', i)
+      body.atoms = hull.new(body.meshes, min, max, settings.hullRing, math.floor(settings.hullAround + 0.5),
+        function() t0 = budget(t0) end)
+      trace('car %d: hull of %d atoms, %d triangles; pinning vertices', i, body.atoms.count, body.atoms.tris)
+      for mi, mesh in ipairs(body.meshes) do
+        mesh.bind = hull.newBindings(mesh.n)
+        for v = 0, mesh.n - 1 do
+          local t1, t2 = hull.bind(body.atoms, mesh.bind, v, mesh.px[v], mesh.py[v], mesh.pz[v], mesh.nx[v], mesh.ny[v], mesh.nz[v])
+          if t1 >= 0 then use(t1, mi, v) end
+          if t2 >= 0 and mesh.bind.bt[v * hull.SLOTS + 1] >= 0 then use(t2, mi, v) end
+          if v % 300 == 0 then t0 = budget(t0) end
+        end
       end
     end
-    body.cells = cells
+    body.users = users
     -- each body vertex's clearance: how far it is from the nearest interior vertex (it can't go in further than
     -- that plus what the interior there gives), through a 0.1 m grid of the interior's vertices
     local G = 0.1
@@ -224,8 +249,8 @@ local function setupCar(i)
     body.left = fl.x >= fr.x and 1 or -1
     body.setupMs = nowMs() - started
     body.state = 'ready'
-    log(('car %d: %d meshes with %d vertices, lattice %dx%dx%d, set up in %.0f ms'):format(i, #body.meshes,
-      body.vertices, body.lattice.n[1], body.lattice.n[2], body.lattice.n[3], body.setupMs))
+    log(('car %d: %d meshes with %d vertices, %d atoms (%s), set up in %.0f ms'):format(i, #body.meshes,
+      body.vertices, body.atoms.count, body.kind, body.setupMs))
   end)
   jobs[#jobs + 1] = {co = co, name = 'setup car ' .. i, body = body}
   return body
@@ -276,8 +301,8 @@ local function send(mesh)
   if not mesh.sent then trace('alterVertices on the copy of "%s": done', mesh.name) mesh.sent = true end
 end
 
--- Moves the vertices near atoms that moved since last time (the cells next to them) with the lattice, then
--- sends each changed mesh to the GPU.
+-- Moves the vertices near atoms that moved since last time (in the lattice cells or on the hull triangles next
+-- to them) with the atoms, then sends each changed mesh to the GPU.
 local function skin(body)
   if body.skinning then body.skinAgain = true return end
   body.skinning = true
@@ -285,32 +310,49 @@ local function skin(body)
     repeat
       body.skinAgain = false
       local started, work, count = nowMs(), 0, 0
-      local l = body.lattice
+      local l, isHull = body.atoms, body.kind == 'hull'
       local changed = {}
+      local seen = {}  -- (hull) a vertex is in up to two triangles' lists: once is enough
+      for mi = 1, #body.meshes do seen[mi] = {} end
+      if isHull then hull.begin(l) end
       -- the crunch's noise, picked once for this pass
       local crunchFn = settings.crunchStyle == 'hammered' and noise.fbm or noise.ridged
       local cf, no = 1 / settings.crunchSize, body.noiseOffset
       local withGrad = noise.withGrad
       local share, maxBody, maxInterior, maxCrunch = settings.interiorShare, settings.maxBodyIn, settings.maxInteriorIn, settings.maxCrunch
-      for cell in pairs(lattice.takeChanged(l)) do
-        local list = body.cells[cell]
+      for key in pairs(isHull and hull.takeChanged(l) or lattice.takeChanged(l)) do
+        local list = body.users[key]
         if list then
           for e = 1, #list, 2 do
-            local mesh, v = body.meshes[list[e]], list[e + 1]
+            local mi, v = list[e], list[e + 1]
+            local mesh = body.meshes[mi]
+            local s = seen[mi]
+            if s[v] then mesh = nil else s[v] = true end
+            if mesh then
             if not mesh.work and not mesh.failed then
               mesh.work = freshVertices(mesh, 'to dent')
               mesh.failed = mesh.work == nil  -- left as it is
             end
             local raw, orig = mesh.work and mesh.work.raw, mesh.orig.raw
             local T = mesh.toMesh
-            local ox, oy, oz, ax, ay, az, bx, by, bz, cx, cy, cz, crunch
-            if raw then ox, oy, oz, ax, ay, az, bx, by, bz, cx, cy, cz, crunch = lattice.sample(l, mesh.px[v], mesh.py[v], mesh.pz[v]) end
+            local nx0, ny0, nz0 = mesh.nx[v], mesh.ny[v], mesh.nz[v]
+            local ox, oy, oz, qx, qy, qz, crunch
+            if raw then
+              if isHull then
+                ox, oy, oz, qx, qy, qz, crunch = hull.sample(l, mesh.bind, v)
+              else
+                local ax, ay, az, bx, by, bz, cx, cy, cz
+                ox, oy, oz, ax, ay, az, bx, by, bz, cx, cy, cz, crunch = lattice.sample(l, mesh.px[v], mesh.py[v], mesh.pz[v])
+                if ox then qx, qy, qz = lattice.bendNormal(nx0, ny0, nz0, ax, ay, az, bx, by, bz, cx, cy, cz) end
+              end
+            end
             if ox then
-              local nx0, ny0, nz0 = mesh.nx[v], mesh.ny[v], mesh.nz[v]
               if mesh.interior then  -- the interior: a share of what the body does
                 local k = share
                 ox, oy, oz, crunch = ox * k, oy * k, oz * k, crunch * k
-                ax, ay, az, bx, by, bz, cx, cy, cz = ax * k, ay * k, az * k, bx * k, by * k, bz * k, cx * k, cy * k, cz * k
+                qx, qy, qz = nx0 + k * (qx - nx0), ny0 + k * (qy - ny0), nz0 + k * (qz - nz0)
+                local ql = math.sqrt(qx * qx + qy * qy + qz * qz)
+                if ql > 1e-9 then qx, qy, qz = qx / ql, qy / ql, qz / ql end
               end
               -- how far it may move: the interior a quarter foot; the body half a foot, and only as far as closes
               -- the gap to the interior behind it. The same dent moves the interior there `share` as much (up to
@@ -329,7 +371,6 @@ local function skin(body)
                 ox, oy, oz = ox * k, oy * k, oz * k
                 crunch = math.min(maxCrunch, crunch + (len - limit) * 0.3)
               end
-              local qx, qy, qz = lattice.bendNormal(nx0, ny0, nz0, ax, ay, az, bx, by, bz, cx, cy, cz)
               -- crunch: the metal pushed in and out along its surface's normal by noise (creases ~crunchSize and
               -- finer), as much as the crunch there; the normal tilts with the noise's slope
               if crunch > 1e-4 then
@@ -366,6 +407,7 @@ local function skin(body)
               local t = nowMs()
               if t - t0 > settings.budgetMs then work = work + (t - t0) t0 = coroutine.yield() end
             end
+            end
           end
         end
       end
@@ -396,8 +438,8 @@ end
 ac.onRelease(function() for _, body in pairs(cars) do restoreNow(body) end end)
 
 local function repair(body)
-  if not body or not body.lattice then return end
-  lattice.reset(body.lattice)
+  if not body or not body.atoms then return end
+  if body.kind == 'hull' then hull.reset(body.atoms) else lattice.reset(body.atoms) end
   body.dents = 0
   skin(body)
 end
@@ -420,7 +462,8 @@ local function dentWorld(body, worldPos, worldDir, depth, radius, severity)
   local give = (along < 0 and settings.frontGive or settings.rearGive) * d.z * d.z + settings.sideGive * d.x * d.x
     + settings.roofGive * d.y * d.y
   depth = depth * give
-  lattice.dent(body.lattice, p.x, p.y, p.z, d.x, d.y, d.z, depth, radius, settings.maxOffset, settings.springs, 0.35,
+  local dent = body.kind == 'hull' and hull.dent or lattice.dent
+  dent(body.atoms, p.x, p.y, p.z, d.x, d.y, d.z, depth, radius, settings.maxOffset, settings.springs, 0.35,
     crunchFor(depth, (severity or depth / 0.1) * give), settings.maxCrunch)
   body.dents = body.dents + 1
   body.lastDent = {x = p.x, y = p.y, z = p.z}
@@ -727,12 +770,17 @@ function script.windowMain(dt)
   end
   ui.text(('Car %d: %s%s'):format(body.index, body.state, body.state == 'reading meshes' and body.reading and (' ' .. body.reading) or ''))
   if body.error then ui.textColored('Error: ' .. body.error, rgbm(1, 0.4, 0.3, 1)) end
-  if body.lattice then
-    local l = body.lattice
+  if body.atoms then
+    local l = body.atoms
     local interior = 0
     for _, m in ipairs(body.meshes) do if m.interior then interior = interior + 1 end end
-    ui.text(('%d meshes (%d interior; of %d, %d left still), %d vertices; lattice %d x %d x %d'):format(#body.meshes,
-      interior, body.meshCount or 0, body.skipped or 0, body.vertices, l.n[1], l.n[2], l.n[3]))
+    ui.text(('%d meshes (%d interior; of %d, %d left still), %d vertices'):format(#body.meshes,
+      interior, body.meshCount or 0, body.skipped or 0, body.vertices))
+    if body.kind == 'hull' then
+      ui.text(('Hull: %d atoms (%d rings of %d, and the ends), %d triangles'):format(l.count, l.rings, l.around, l.tris))
+    else
+      ui.text(('Box lattice: %d x %d x %d atoms'):format(l.n[1], l.n[2], l.n[3]))
+    end
     ui.text(('Setup %.0f ms. Last re-skin: %d vertices, %.0f ms of work over %.0f ms.'):format(body.setupMs,
       body.lastSkinCount or 0, body.lastSkinMs or 0, body.lastSkinSpan or 0))
     ui.text(('Dents: %d (%d from crashes%s)'):format(body.dents, body.crashes or 0,
@@ -778,7 +826,16 @@ function script.windowSettings(dt)
   slider('interiorShare', 'Interior moves %.0f%% of the body', 0, 90, 100)
   slider('springs', 'Spring passes: %.0f', 0, 6, 1, true)
   slider('maxOffset', 'Most an atom moves: %.2f m', 0.1, 1)
-  slider('spacing', 'Atom spacing: %.2f m (rebuild)', 0.15, 0.8)
+  local kinds = {'hull', 'box'}
+  local pickKind = ui.combo('Atoms (rebuild)', settings.atoms == 'box' and 2 or 1, ui.ComboFlags.None,
+    {'Car-shaped hull (1nsane)', 'Box lattice (0.4)'})
+  if kinds[pickKind] then settings.atoms = kinds[pickKind] end
+  if settings.atoms == 'box' then
+    slider('spacing', 'Atom spacing: %.2f m (rebuild)', 0.15, 0.8)
+  else
+    slider('hullRing', 'Hull rings every %.2f m (rebuild)', 0.15, 0.8)
+    slider('hullAround', 'Hull atoms around: %.0f (rebuild)', 6, 24, 1, true)
+  end
   slider('budgetMs', 'Work per frame: %.1f ms', 1, 16)
   if ui.checkbox('Read the car I\'m watching without the button', settings.readWatched) then settings.readWatched = not settings.readWatched end
   if ui.checkbox('Dent copies of the meshes (createMesh crashed AC in test C)', settings.method == 'copy') then
