@@ -13,6 +13,8 @@ local settings = ac.storage{
   springs = 2,         -- spring passes after each dent (0 = a dent stays exactly where it's pushed)
   maxOffset = 0.5,     -- how far an atom can be pushed in total
   autoRead = false,    -- read the car being watched without pressing the button
+  method = 'copy',     -- how dents are shown: 'copy' (our own copies of the meshes, the originals hidden) or
+                       -- 'direct' (the car's own meshes changed: crashed AC in the first test)
   crashes = false,     -- dents from crashes (experimental)
   crashScale = 1,
   budgetMs = 4,        -- work per frame (setup and re-skinning)
@@ -149,6 +151,35 @@ local function setupCar(i)
   return body
 end
 
+-- Shows a mesh's new vertices. 'direct': the car's own mesh takes them. 'copy': at its first dent, a copy of the
+-- mesh is made under the same node with the same material and the original hidden; the copy takes them.
+local function send(mesh)
+  if settings.method == 'direct' and not mesh.copy then
+    if not mesh.sent then trace('alterVertices "%s" (%d vertices), first time', mesh.name, mesh.n) end
+    mesh.ref:alterVertices(mesh.work)
+    if not mesh.sent then trace('alterVertices "%s": done', mesh.name) mesh.sent = true end
+    return
+  end
+  if not mesh.copy then
+    trace('copy of "%s": getIndices', mesh.name)
+    local indices = mesh.ref:getIndices()
+    trace('copy of "%s": %s indices; createMesh', mesh.name, indices and indices:size() or 'no')
+    if not indices then return end
+    local copy = mesh.ref:getParent():createMesh('softdamage_' .. mesh.name, nil, mesh.work:clone(), indices, false, false)
+    trace('copy of "%s": %s; assignMaterialFrom', mesh.name, copy and 'made' or 'failed')
+    if not copy then return end
+    copy:assignMaterialFrom(mesh.ref)
+    trace('copy of "%s": material set; hiding the original', mesh.name)
+    mesh.ref:setVisible(false)
+    mesh.copy = copy
+    trace('copy of "%s": done', mesh.name)
+    return
+  end
+  if not mesh.sent then trace('alterVertices on the copy of "%s", first time', mesh.name) end
+  mesh.copy:alterVertices(mesh.work)
+  if not mesh.sent then trace('alterVertices on the copy of "%s": done', mesh.name) mesh.sent = true end
+end
+
 -- Moves the vertices near atoms that moved since last time (the cells next to them) with the lattice, then
 -- sends each changed mesh to the GPU.
 local function skin(body)
@@ -194,11 +225,7 @@ local function skin(body)
           end
         end
       end
-      for mesh in pairs(changed) do
-        if not mesh.sent then trace('alterVertices "%s" (%d vertices), first time', mesh.name, mesh.n) end
-        mesh.ref:alterVertices(mesh.work)
-        if not mesh.sent then trace('alterVertices "%s": done', mesh.name) mesh.sent = true end
-      end
+      for mesh in pairs(changed) do send(mesh) end
       work = work + (nowMs() - t0)
       body.lastSkinMs, body.lastSkinSpan, body.lastSkinCount = work, nowMs() - started, count
     until not body.skinAgain
@@ -209,8 +236,19 @@ end
 
 -- Puts every mesh back as it was, now (not over frames).
 local function restoreNow(body)
-  for _, mesh in ipairs(body and body.meshes or {}) do if mesh.sent then mesh.ref:alterVertices(mesh.orig) end end
+  for _, mesh in ipairs(body and body.meshes or {}) do
+    if mesh.copy then
+      mesh.copy:dispose()
+      mesh.copy = nil
+      mesh.ref:setVisible(true)
+    elseif mesh.sent then
+      mesh.ref:alterVertices(mesh.orig)
+    end
+    mesh.sent, mesh.work, mesh.moved = nil, nil, {}
+  end
 end
+-- unloading (AC closing, the app reloaded): the originals back
+ac.onRelease(function() for _, body in pairs(cars) do restoreNow(body) end end)
 
 local function repair(body)
   if not body or not body.lattice then return end
@@ -324,6 +362,72 @@ local function slider(key, label, min, max, scale, integer)
   if v ~= settings[key] then settings[key] = v end
 end
 
+-- ---------------------------------------------------------------------------------------------
+-- Tests, one at a time (a crash ends AC; the trace file shows the step): A, a track mesh sent back unchanged
+-- (does the call work at all?); B, the car's smallest body mesh sent back unchanged (car meshes?); C, a copy
+-- of that mesh made, the original hidden, and the copy lifted 5 cm (the 'copy' way).
+local testResult = {}
+local testCopy
+local function smallestMesh(body)
+  local best
+  for _, m in ipairs(body.meshes) do if not best or m.n < best.n then best = m end end
+  return best
+end
+local function testA()
+  trace('test A: finding track meshes')
+  local meshes = ac.findNodes('trackRoot:yes'):findMeshes('?')
+  trace('test A: %d track meshes', meshes:size())
+  for m = 1, math.min(meshes:size(), 300) do
+    local ref = meshes:at(m)
+    local v = ref:getVertices()
+    if v and v:size() > 0 and v:size() < 5000 then
+      trace('test A: alterVertices on "%s" (%d vertices), unchanged', meshes:name(m), v:size())
+      ref:alterVertices(v)
+      trace('test A: done')
+      return 'passed ("' .. meshes:name(m) .. '", ' .. v:size() .. ' vertices)'
+    end
+  end
+  return 'no small track mesh found'
+end
+local function testB(body)
+  local mesh = smallestMesh(body)
+  trace('test B: alterVertices on "%s" (%d vertices), unchanged', mesh.name, mesh.n)
+  mesh.ref:alterVertices(mesh.orig)
+  trace('test B: done')
+  return 'passed ("' .. mesh.name .. '")'
+end
+local function testC(body)
+  local mesh = smallestMesh(body)
+  trace('test C: "%s" (%d vertices): getIndices', mesh.name, mesh.n)
+  local indices = mesh.ref:getIndices()
+  trace('test C: %s indices; createMesh', indices and indices:size() or 'no')
+  if not indices then return 'no indices' end
+  local v = mesh.orig:clone()
+  local copy = mesh.ref:getParent():createMesh('softdamage_test', nil, v:clone(), indices, false, false)
+  trace('test C: %s', copy and 'made' or 'createMesh failed')
+  if not copy then return 'createMesh failed' end
+  copy:assignMaterialFrom(mesh.ref)
+  trace('test C: material set; hiding the original')
+  mesh.ref:setVisible(false)
+  testCopy = {copy = copy, mesh = mesh}
+  -- lift it 5 cm (body space up, into the mesh's space)
+  local T = mesh.toMesh
+  for i = 0, v:size() - 1 do
+    v.raw[i].pos.x, v.raw[i].pos.y, v.raw[i].pos.z = v.raw[i].pos.x + T[4] * 0.05, v.raw[i].pos.y + T[5] * 0.05, v.raw[i].pos.z + T[6] * 0.05
+  end
+  trace('test C: alterVertices on the copy (lifted 5 cm)')
+  copy:alterVertices(v)
+  trace('test C: done')
+  return 'passed ("' .. mesh.name .. '" should be 5 cm up; Undo C puts it back)'
+end
+local function undoC()
+  if not testCopy then return end
+  testCopy.copy:dispose()
+  testCopy.mesh.ref:setVisible(true)
+  testCopy = nil
+  trace('test C undone')
+end
+
 function script.windowMain(dt)
   local body = cars[sim.focusedCar]
   if not body then
@@ -350,6 +454,18 @@ function script.windowMain(dt)
   end
   if ui.button('Repair') then repair(body) end
   ui.textWrapped('Or hold Ctrl and click on the car.')
+  ui.separator()
+  ui.text('Tests (one per AC launch if they crash):')
+  if ui.button('A: track mesh') then testResult.A = testA() end
+  ui.sameLine()
+  if body.state == 'ready' then
+    if ui.button('B: car mesh') then testResult.B = testB(body) end
+    ui.sameLine()
+    if ui.button('C: car mesh copy') then testResult.C = testC(body) end
+    ui.sameLine()
+    if ui.button('Undo C') then undoC() testResult.C = nil end
+  end
+  for _, k in ipairs({'A', 'B', 'C'}) do if testResult[k] then ui.textWrapped(k .. ': ' .. testResult[k]) end end
   slider('depth', 'Dent depth: %.2f m', 0.01, 0.5)
   slider('radius', 'Dent radius: %.2f m', 0.1, 1.5)
 end
@@ -360,6 +476,9 @@ function script.windowSettings(dt)
   slider('spacing', 'Atom spacing: %.2f m (rebuild)', 0.15, 0.8)
   slider('budgetMs', 'Work per frame: %.1f ms', 1, 16)
   if ui.checkbox('Read the car I\'m watching without the button', settings.autoRead) then settings.autoRead = not settings.autoRead end
+  if ui.checkbox('Dent the car\'s own meshes (not copies; crashed AC in the first test)', settings.method == 'direct') then
+    settings.method = settings.method == 'direct' and 'copy' or 'direct'
+  end
   if ui.checkbox('Dents from crashes (experimental)', settings.crashes) then settings.crashes = not settings.crashes end
   slider('crashScale', 'Crash dent scale: %.2f', 0.1, 3)
   if ui.button('Rebuild (re-read the car)') then

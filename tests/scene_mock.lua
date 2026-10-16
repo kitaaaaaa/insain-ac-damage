@@ -99,6 +99,10 @@ return function(opts)
   H.doorMesh = {name = 'door', parent = door, vertices = buffer({{0, 0, 0, 1, 0, 0}, {0, 0.1, 0, 1, 0, 0}, {0.1, 0, 0, 1, 0, 0}})}
   body.meshes = {H.bodyMesh}
   door.meshes = {H.doorMesh}
+  local track = node('trackRoot:yes', H.rotY(0))
+  H.trackMesh = {name = 'road', parent = track, vertices = buffer({{0, 0, 0, 0, 1, 0}, {1, 0, 0, 0, 1, 0}, {0, 0, 1, 0, 1, 0}})}
+  track.meshes = {H.trackMesh}
+  H.created = {}
   H.doorLocal = doorLocal
   -- scene references: a list of nodes or meshes
   local Ref = {}
@@ -124,6 +128,24 @@ return function(opts)
   function Ref:getParent() return ref({self.items[1].parent}) end
   function Ref:getWorldTransformationRaw() return self.items[1].world end
   function Ref:isPhysicsOnlyMesh() return false end
+  function Ref:getIndices() local m = self.items[1] local b = {n = m.vertices.n} function b:size() return self.n end return b end
+  function Ref:createMesh(name, material, vertices, indices, keepAlive, moveData)
+    local parent = self.items[1]
+    assert(vertices.n > 0 and indices:size() > 0, 'createMesh args')
+    local m = {name = name, parent = parent, vertices = vertices:clone(), created = true, visible = true}
+    parent.meshes[#parent.meshes + 1] = m
+    H.created[#H.created + 1] = m
+    return ref({m})
+  end
+  function Ref:assignMaterialFrom(other) self.items[1].material = other.items[1].name return self end
+  function Ref:setVisible(v) for _, m in ipairs(self.items) do m.hidden = not v end return self end
+  function Ref:dispose()
+    for _, m in ipairs(self.items) do
+      m.disposed = true
+      for i, x in ipairs(m.parent.meshes) do if x == m then table.remove(m.parent.meshes, i) break end end
+    end
+    self.items = {}
+  end
   -- ray against the world-space box around the meshes (the fake car is a box)
   function Ref:raycast(ray)
     local mn, mx = {1e9, 1e9, 1e9}, {-1e9, -1e9, -1e9}
@@ -169,6 +191,7 @@ return function(opts)
     log = function(...) local t = {} for i = 1, select('#', ...) do t[i] = tostring(select(i, ...)) end H.logs[#H.logs + 1] = table.concat(t, ' ') end,
     findNodes = function(f) return ref({nodes[f]}) end,
     onCarJumped = function(i, cb) H.jumps[i] = cb end,
+    onRelease = function(cb) H.release = cb end,
     isKeyDown = function(k) return H.keys[k] == true end,
     KeyIndex = {Control = 0x11, LeftButton = 0x01},
   }

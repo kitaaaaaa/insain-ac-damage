@@ -41,6 +41,8 @@ local function moved(buf, ref, filter)
 end
 local function press(label) H.buttons[label] = true H.frame() H.buttons[label] = nil H.settle() end
 
+-- the car's own meshes changed (the 'direct' way) for the checks below; the 'copy' way after them
+H.storage.method = 'direct'
 -- a front dent: only vertices at the front move, and inward (-z)
 H.storage.springs = 0
 press('front')
@@ -95,6 +97,38 @@ H.car.collisionDepth = 0
 H.settle()
 n = moved(H.bodyMesh.vertices, orig, function(p) return p.z > 2.2 - 1.2 end)
 check(body.lastCrash and body.lastCrash > 13 and n > 0, 'crash: a dent at the front: ' .. n .. ' ' .. tostring(body.lastCrash))
+
+-- the 'copy' way: the first dent makes a copy (same node, same material), hides the original, leaves its
+-- vertices alone; the copy takes the dents
+press('Repair')
+H.storage.method = 'copy'
+H.storage.crashes = false
+local altered = H.altered.body or 0
+press('front')
+local copy = H.created[#H.created]
+check(copy and copy.name == 'softdamage_body' and copy.parent == H.bodyMesh.parent and copy.material == 'body', 'copy made under the same node with the material')
+check(H.bodyMesh.hidden and not copy.hidden, 'original hidden, copy shown')
+check((H.altered.body or 0) == altered and moved(H.bodyMesh.vertices, orig) == 0, 'the original mesh untouched')
+n = moved(copy.vertices, orig, function(p) return p.z > 2.2 - 0.6 end)
+check(n > 0, 'the copy dented at the front: ' .. n)
+press('back')
+n = moved(copy.vertices, orig)
+check(#H.created == 1 and n > 0, 'later dents go to the same copy')
+press('Repair')
+check(moved(copy.vertices, orig) == 0, 'repair: the copy back to the original shape')
+-- unloading puts the originals back
+H.release()
+check(copy.disposed and not H.bodyMesh.hidden, 'unload: copy removed, original shown')
+H.storage.method = 'direct'
+-- tests A, B, C
+H.buttons['A: track mesh'] = true H.frame() H.buttons['A: track mesh'] = nil
+H.buttons['B: car mesh'] = true H.frame() H.buttons['B: car mesh'] = nil
+H.buttons['C: car mesh copy'] = true H.frame() H.buttons['C: car mesh copy'] = nil
+local testCopy = H.created[#H.created]
+check(H.altered.road == 1 and H.altered.door and testCopy.name == 'softdamage_test' and H.doorMesh.hidden, 'tests A, B, C ran')
+check(math.abs(testCopy.vertices.raw[0].pos.y - H.doorMesh.vertices.raw[0].pos.y - 0.05) < 1e-5, 'test C: the copy lifted 5 cm')
+H.buttons['Undo C'] = true H.frame() H.buttons['Undo C'] = nil
+check(testCopy.disposed and not H.doorMesh.hidden, 'undo C')
 
 -- rebuild: reads the undamaged model again
 H.buttons['Rebuild (re-read the car)'] = true H.frame() H.buttons['Rebuild (re-read the car)'] = nil

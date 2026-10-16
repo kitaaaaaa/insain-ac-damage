@@ -27,6 +27,21 @@ if AC crashes, the file's last line shows where.
 
 The window shows the meshes and vertices read, the lattice, and how long setup and each re-skin took.
 
+## Tests in the window
+
+Changing a car's meshes directly crashed AC in the first test, so dents now go to **copies** of the car's body
+meshes: at a mesh's first dent, a copy is made under the same node with the same material, and the original
+is hidden (shown again on repair through Rebuild, or when the app closes). A setting switches back to changing
+the car's own meshes.
+
+To find out what works, the window has three tests. Run them one per AC launch, in order, since a crash ends
+AC (`softdamage_trace.txt` then shows the step):
+
+- **A: track mesh**: sends a small track mesh back unchanged. Does the call work at all?
+- **B: car mesh**: sends the car's smallest body mesh back unchanged. Is it car meshes?
+- **C: car mesh copy**: makes a copy of that mesh, hides the original, and lifts the copy 5 cm (should be
+  visible). Does the copy way work? **Undo C** puts it back.
+
 ## How it works
 
 - The meshes under the car's `BODYTR` node (the car's body, not its wheels and suspension) are read once
