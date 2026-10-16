@@ -60,6 +60,7 @@ local settings = ac.storage{
 
 local sim = ac.getSim()
 local PACK = 16777216  -- (mesh, vertex) pairs in one number: mesh * PACK + vertex
+local function cross(ax, ay, az, bx, by, bz) return ay * bz - az * by, az * bx - ax * bz, ax * by - ay * bx end
 local function log(...) ac.log('[softdamage]', ...) end
 
 -- A trace of every call into CSP, one line at a time to a file closed after each line, so that if AC crashes
@@ -157,6 +158,21 @@ local function movingPart(ref, meshName)
   return nil
 end
 
+-- Which wheel a mesh is part of, if any: centred on its hub (within a third of the tyre's radius), about as
+-- tall and long as the tyre (1.3 to 2.6 radii), and no wider than the wheel's space. Else nil.
+local function wheelOf(wheels, mn, mx)
+  for k, W in ipairs(wheels) do
+    local r = W[6]
+    local cx, cy, cz = (mn[1] + mx[1]) / 2, (mn[2] + mx[2]) / 2, (mn[3] + mx[3]) / 2
+    local sy, sz, sx = mx[2] - mn[2], mx[3] - mn[3], mx[1] - mn[1]
+    if math.sqrt((cx - W[1]) ^ 2 + (cy - W[2]) ^ 2 + (cz - W[3]) ^ 2) < r * 0.35
+      and sy > r * 1.3 and sy < r * 2.6 and sz > r * 1.3 and sz < r * 2.6 and sx < W[5] * 2 then
+      return k
+    end
+  end
+  return nil
+end
+
 -- Reads the body meshes of car i: their vertices in the body's own coordinates (BODYTR space), once.
 local function setupCar(i)
   local body = {index = i, meshes = {}, vertices = 0, state = 'reading meshes', setupMs = 0, lastSkinMs = 0, dents = 0}
@@ -173,6 +189,21 @@ local function setupCar(i)
     local bodyWorld = bodyNode:getWorldTransformationRaw():clone()
     local invBody = bodyWorld:inverse()
     trace('car %d: body transform read; finding meshes', i)
+    -- the wheels (body space, at rest): where each is and how big its tyre (from AC). Used to keep the wheel
+    -- wells clear of them (each a cylinder across the car, a little bigger than the tyre for the suspension's
+    -- travel, wider at the front for the steering), and to tell which meshes are wheels
+    body.wheels, body.wheelParts = {}, {}
+    local carNow = ac.getCar(i)
+    for w = 0, 3 do
+      local wh = carNow and carNow.wheels and carNow.wheels[w]
+      if wh and wh.position then
+        local p = invBody:transformPoint(wh.position)
+        local r = (wh.tyreRadius and wh.tyreRadius > 0.01) and wh.tyreRadius or 0.33
+        local hw = ((wh.tyreWidth and wh.tyreWidth > 0.005) and wh.tyreWidth or r * 0.75) / 2
+        body.wheels[#body.wheels + 1] = {p.x, p.y, p.z, r * 1.2, hw + r * (w < 2 and 0.3 or 0.12), r, hw}
+        trace('car %d: wheel %d, radius %.3f m, width %.3f m', i, w, r, hw * 2)
+      end
+    end
     -- the meshes to read: everything under BODYTR, and (a setting) the car's other meshes that aren't on moving
     -- parts. body.parts says what became of each, for the window
     local list, under = {}, {}
@@ -190,7 +221,11 @@ local function setupCar(i)
         if not under[name] then
           local ref = all:at(m)
           local moving = movingPart(ref, name)
-          if moving then
+          local turns = moving and (moving:upper():find('WHEEL', 1, true) or moving:upper():find('RIM', 1, true)
+            or moving:upper():find('TYRE', 1, true) or moving:upper():find('TIRE', 1, true))
+          if turns then
+            list[#list + 1] = {ref = ref, name = name, outside = true, wheelCandidate = moving}
+          elseif moving then
             body.parts[#body.parts + 1] = {name = name, status = 'outside BODYTR, on a moving part (' .. moving .. '): left alone'}
             trace('mesh "%s": outside BODYTR, on a moving part (%s): left alone', name, moving)
           else
@@ -266,9 +301,25 @@ local function setupCar(i)
           if v % 2000 == 0 then t0 = budget(t0) end
         end
         mesh.min, mesh.max = mmin, mmax
-        body.meshes[#body.meshes + 1] = mesh
-        item.mesh = mesh
-        body.vertices = body.vertices + mesh.n
+        -- a wheel's part: centred on a wheel's hub and about as big as its tyre, whatever it's called and wherever
+        -- it hangs in the model (CSP's replacement wheels too). Not bodywork: it turns with the wheel, and
+        -- bends with it on a hard hit (see bendWheel)
+        local wk = wheelOf(body.wheels, mmin, mmax)
+        if wk then
+          local W = body.wheels[wk]
+          mesh.wheel = wk
+          mesh.hubM = invParent:transformPoint(bodyWorld:transformPoint(vec3(W[1], W[2], W[3])))
+          mesh.tilt = {1, 0, 0, 0, 1, 0, 0, 0, 1}
+          body.wheelParts[#body.wheelParts + 1] = mesh
+          status = where .. ('wheel %d: turns with it, bends on hard hits'):format(wk)
+          trace('mesh %d/%d: wheel %d', m, body.meshCount, wk)
+        elseif item.wheelCandidate then
+          status = 'outside BODYTR, on a moving part (' .. item.wheelCandidate .. '): left alone'
+        else
+          body.meshes[#body.meshes + 1] = mesh
+          item.mesh = mesh
+          body.vertices = body.vertices + mesh.n
+        end
         trace('mesh %d/%d: read', m, body.meshCount)
       end
       end
@@ -319,9 +370,14 @@ local function setupCar(i)
     if #body.meshes == 0 then body.state = 'no meshes with vertices under BODYTR' return end
     -- the box: the meshes', no more than 0.6 m past AC's
     for a = 1, 3 do
-      min[a] = math.max(min[a], bmin[a] - 0.6) - 0.05
-      max[a] = math.min(max[a], bmax[a] + 0.6) + 0.05
+      min[a] = math.max(min[a], bmin[a] - 0.6)
+      max[a] = math.min(max[a], bmax[a] + 0.6)
     end
+    -- the car's size against an ordinary car's (4.5 m): the hull's spacing, dents, crunch and margins scale with
+    -- it, so a model car half a metre long dents like a real one, not as if hit by something its own size
+    body.scale = math.max(0.05, math.min(2, (max[3] - min[3]) / 4.5))
+    for a = 1, 3 do min[a], max[a] = min[a] - 0.05 * body.scale, max[a] + 0.05 * body.scale end
+    trace('car %d: %.2f m long: scale %.2f', i, max[3] - min[3], body.scale)
     body.min, body.max = min, max
     body.noiseOffset = {math.random() * 200, math.random() * 200, math.random() * 200}  -- each car crumples its own way
     -- the vertices to redo when atoms move: per lattice cell, or per hull triangle (a list of mesh, vertex pairs)
@@ -333,7 +389,7 @@ local function setupCar(i)
     end
     if settings.atoms == 'box' then
       body.kind = 'box'
-      body.atoms = lattice.new(min, max, settings.spacing)
+      body.atoms = lattice.new(min, max, math.max(0.02, settings.spacing * body.scale))
       for mi, mesh in ipairs(body.meshes) do
         for v = 0, mesh.n - 1 do
           use(lattice.cellOf(body.atoms, mesh.px[v], mesh.py[v], mesh.pz[v]), mi, v)
@@ -343,7 +399,7 @@ local function setupCar(i)
     else
       body.kind = 'hull'
       trace('car %d: building the hull', i)
-      body.atoms = hull.new(body.meshes, min, max, settings.hullRing, math.floor(settings.hullAround + 0.5),
+      body.atoms = hull.new(body.meshes, min, max, math.max(0.02, settings.hullRing * body.scale), math.floor(settings.hullAround + 0.5),
         function() t0 = budget(t0) end)
       trace('car %d: hull of %d atoms, %d triangles; pinning vertices', i, body.atoms.count, body.atoms.tris)
       for mi, mesh in ipairs(body.meshes) do
@@ -366,10 +422,10 @@ local function setupCar(i)
     end
     body.users = users
     -- each vertex's crunch noise, now (in the background), so a crash only has to move vertices
-    local key = settings.crunchStyle .. settings.crunchSize
+    local key = settings.crunchStyle .. settings.crunchSize * body.scale
     body.noiseKey, body.noiseVer = key, 1
     local crunchFn = settings.crunchStyle == 'hammered' and noise.fbm or noise.ridged
-    local f, no = 1 / settings.crunchSize, body.noiseOffset
+    local f, no = 1 / (settings.crunchSize * body.scale), body.noiseOffset
     for _, mesh in ipairs(body.meshes) do
       mesh.noise, mesh.noiseVer = arrays.floats(mesh.n * 4), arrays.bytes(mesh.n)
       local cache = mesh.noise
@@ -382,7 +438,7 @@ local function setupCar(i)
     end
     -- each body vertex's clearance: how far it is from the nearest interior vertex (it can't go in further than
     -- that plus what the interior there gives), through a 0.1 m grid of the interior's vertices
-    local G = 0.1
+    local G = math.max(0.01, 0.1 * body.scale)
     local grid, interiorCount = {}, 0
     local function key(x, y, z) return math.floor(x / G) * 73856093 + math.floor(y / G) * 19349663 + math.floor(z / G) * 83492791 end
     for _, mesh in ipairs(body.meshes) do
@@ -422,20 +478,6 @@ local function setupCar(i)
         end
       end
     end
-    -- the wheels, so the wheel wells stay clear of them: each a cylinder across the car (body space, at rest),
-    -- a little bigger than the tyre for the suspension's travel, and wider at the front for the steering. A
-    -- body vertex near one keeps how far it was into that space at rest (most: none), no further
-    body.wheels = {}
-    local carNow = ac.getCar(i)
-    for w = 0, 3 do
-      local wh = carNow and carNow.wheels and carNow.wheels[w]
-      if wh and wh.position then
-        local p = invBody:transformPoint(wh.position)
-        local r = (wh.tyreRadius and wh.tyreRadius > 0.1) and wh.tyreRadius or 0.33
-        local hw = ((wh.tyreWidth and wh.tyreWidth > 0.05) and wh.tyreWidth or 0.25) / 2
-        body.wheels[#body.wheels + 1] = {p.x, p.y, p.z, r + 0.07, hw + (w < 2 and 0.1 or 0.04)}
-      end
-    end
     for _, mesh in ipairs(body.meshes) do
       if not mesh.interior and #body.wheels > 0 then
         local near = 0
@@ -444,7 +486,7 @@ local function setupCar(i)
           for k, W in ipairs(body.wheels) do
             local ax = math.abs(x - W[1])
             local dyz = math.sqrt((y - W[2]) ^ 2 + (z - W[3]) ^ 2)
-            if ax < W[5] + 0.4 and dyz < W[4] + 0.4 then
+            if ax < W[5] + W[6] * 1.2 and dyz < W[4] + W[6] * 1.2 then
               if not mesh.wheelI then mesh.wheelI, mesh.wheelPen = arrays.bytes(mesh.n), arrays.floats(mesh.n) end
               -- which wheel (and which side of it: 1 or 2 more than 4 for the inner side), and how far into its
               -- space the vertex is at rest
@@ -514,6 +556,11 @@ local function stopBending(mesh)
 end
 -- A vertex's new place (mesh space): shown at once (bend 0), or eased to.
 local function show(bendTime, mesh, v, x, y, z, nx, ny, nz)
+  -- never anything but a finite number to AC (a NaN or a huge value in a vertex could take the game down)
+  if not (x == x and y == y and z == z and nx == nx and ny == ny and nz == nz and x * x + y * y + z * z < 1e8) then
+    if not mesh.badWarned then mesh.badWarned = true trace('"%s": a vertex came out not finite: left as it was', mesh.name) end
+    return
+  end
   local r = mesh.work.raw[v]
   if bendTime <= 0 then
     if mesh.aon and mesh.aon[v] == 1 then  -- (if bending: there now, at the next step)
@@ -683,7 +730,7 @@ local function skinVertex(ctx, mesh, v)
     limit = ctx.maxBody
     -- not through the interior: only as far as closes the gap to it (less 1.5 cm). The interior there moves in
     -- with the body too, so the gap's only ever bigger than that
-    if ctx.interiorBlocks then limit = math.min(limit, math.max(0, mesh.clear[v] - 0.015)) end
+    if ctx.interiorBlocks then limit = math.min(limit, math.max(0, mesh.clear[v] - 0.015 * ctx.scale)) end
   end
   local len = math.sqrt(ox * ox + oy * oy + oz * oz)
   local k = len > limit and limit / len or 1
@@ -769,13 +816,14 @@ local function skin(body)
       local crunchFn = settings.crunchStyle == 'hammered' and noise.fbm or noise.ridged
       -- each vertex's noise is kept (it depends only on where the vertex is at rest), till the crunch's style or
       -- size changes
-      local key = settings.crunchStyle .. settings.crunchSize
+      local key = settings.crunchStyle .. settings.crunchSize * body.scale
       if body.noiseKey ~= key then body.noiseKey, body.noiseVer = key, (body.noiseVer or 0) % 255 + 1 end
       local ctx = {isHull = isHull, l = l, share = settings.interiorShare, interiorBlocks = settings.interiorBlocks,
         maxBody = settings.maxBodyIn >= 2.99 and 1e9 or settings.maxBodyIn,
-        maxInterior = settings.maxInteriorIn, maxCrunch = settings.maxCrunch, crunchFn = crunchFn,
+        maxInterior = settings.maxInteriorIn * body.scale, maxCrunch = settings.maxCrunch * body.scale, crunchFn = crunchFn,
+        scale = body.scale,
         bend = body.instantNext and 0 or settings.bendTime,
-        cf = 1 / settings.crunchSize, no = body.noiseOffset, noiseVer = body.noiseVer, wheels = body.wheels}
+        cf = 1 / (settings.crunchSize * body.scale), no = body.noiseOffset, noiseVer = body.noiseVer, wheels = body.wheels}
       -- nearest the dent first: what's there shows in the first frame, the edges after
       local keys = {}
       for key in pairs(isHull and hull.takeChanged(l) or lattice.takeChanged(l)) do keys[#keys + 1] = key end
@@ -846,6 +894,13 @@ end
 
 -- Puts every mesh back as it was, now (not over frames).
 local function restoreNow(body)
+  for _, mesh in ipairs(body and body.wheelParts or {}) do
+    stopBending(mesh)
+    if mesh.tilt and (mesh.tilt[1] ~= 1 or mesh.tilt[5] ~= 1) then
+      for v = 0, mesh.n - 1 do putBack(mesh, v) end
+      mesh.ref:alterVertices(mesh.work)
+    end
+  end
   for _, mesh in ipairs(body and body.meshes or {}) do
     if mesh.copy then
       mesh.copy:dispose()
@@ -864,11 +919,72 @@ end
 -- unloading (AC closing, the app reloaded): the originals back
 ac.onRelease(function() for _, body in pairs(cars) do restoreNow(body) end end)
 
+-- Bent wheels: a hard hit near a wheel tilts its parts a little about the hub, across the way they turn, so the
+-- wheel wobbles as it turns (a bent rim or axle). `angle` radians more, the tilt towards the push (body space
+-- `dir`); 6 degrees at most in all. The parts bend in like the body (see show).
+local MAX_TILT = 0.1
+local function tiltOf(m) return math.acos(math.max(-1, math.min(1, m[1]))) end
+local function bendWheel(body, k, dir, angle)
+  if angle < 0.002 then return end
+  for _, mesh in ipairs(body.wheelParts) do
+    if mesh.wheel == k and mesh.work then
+      -- the turning axis, and the tilt's axis across it (towards the push), in the part's own space
+      local T = mesh.toMesh
+      local axx, axy, axz = T[1], T[2], T[3]  -- body x (the axle) into mesh space
+      local al = math.sqrt(axx * axx + axy * axy + axz * axz)
+      axx, axy, axz = axx / al, axy / al, axz / al
+      local dx, dy, dz = T[1] * dir.x + T[4] * dir.y + T[7] * dir.z, T[2] * dir.x + T[5] * dir.y + T[8] * dir.z, T[3] * dir.x + T[6] * dir.y + T[9] * dir.z
+      local ux, uy, uz = cross(axx, axy, axz, dx, dy, dz)  -- across both the axle and the push
+      local ul = math.sqrt(ux * ux + uy * uy + uz * uz)
+      if ul < 1e-6 then ux, uy, uz = cross(axx, axy, axz, 0, 1, 0) ul = math.sqrt(ux * ux + uy * uy + uz * uz) end
+      if ul < 1e-6 then ux, uy, uz, ul = 0, 0, 1, 1 end
+      ux, uy, uz = ux / ul, uy / ul, uz / ul
+      -- this bend (Rodrigues) after the ones before, the whole no more than MAX_TILT
+      local c, sn = math.cos(angle), math.sin(angle)
+      local R = {c + ux * ux * (1 - c), ux * uy * (1 - c) - uz * sn, ux * uz * (1 - c) + uy * sn,
+        uy * ux * (1 - c) + uz * sn, c + uy * uy * (1 - c), uy * uz * (1 - c) - ux * sn,
+        uz * ux * (1 - c) - uy * sn, uz * uy * (1 - c) + ux * sn, c + uz * uz * (1 - c)}
+      local M, P = mesh.tilt, {}
+      for r = 0, 2 do for q = 0, 2 do
+        P[r * 3 + q + 1] = R[r * 3 + 1] * M[q + 1] + R[r * 3 + 2] * M[q + 4] + R[r * 3 + 3] * M[q + 7]
+      end end
+      if tiltOf(P) <= MAX_TILT then
+        mesh.tilt = P
+        local h, op = mesh.hubM, mesh.op
+        for v = 0, mesh.n - 1 do
+          local k6 = v * 6
+          local x, y, z = op[k6] - h.x, op[k6 + 1] - h.y, op[k6 + 2] - h.z
+          local nx, ny, nz = op[k6 + 3], op[k6 + 4], op[k6 + 5]
+          show(settings.bendTime, mesh, v, h.x + P[1] * x + P[2] * y + P[3] * z, h.y + P[4] * x + P[5] * y + P[6] * z,
+            h.z + P[7] * x + P[8] * y + P[9] * z, P[1] * nx + P[2] * ny + P[3] * nz, P[4] * nx + P[5] * ny + P[6] * nz,
+            P[7] * nx + P[8] * ny + P[9] * nz)
+        end
+        sendQueue[#sendQueue + 1] = mesh
+        body.bentWheels = (body.bentWheels or 0) + 1
+        trace('car %d: wheel %d bent %.1f degrees ("%s")', body.index, k, math.deg(tiltOf(P)), mesh.name)
+      end
+    end
+  end
+end
+-- Straightens the wheels (a repair).
+local function straightenWheels(body)
+  for _, mesh in ipairs(body.wheelParts or {}) do
+    if mesh.tilt[1] ~= 1 or mesh.tilt[5] ~= 1 then
+      stopBending(mesh)
+      for v = 0, mesh.n - 1 do putBack(mesh, v) end
+      mesh.tilt = {1, 0, 0, 0, 1, 0, 0, 0, 1}
+      sendQueue[#sendQueue + 1] = mesh
+    end
+  end
+  body.bentWheels = 0
+end
+
 local function repair(body)
   if not body or not body.atoms then return end
   if body.kind == 'hull' then hull.reset(body.atoms) else lattice.reset(body.atoms) end
   body.dents = 0
   for _, mesh in ipairs(body.meshes) do stopBending(mesh) end
+  straightenWheels(body)
   body.instantNext = true  -- (a repair is at once)
   skin(body)
 end
@@ -907,11 +1023,19 @@ local function dentWorld(body, worldPos, worldDir, depth, radius, severity)
     end
   end
   dent(body.atoms, p.x, p.y, p.z, d.x, d.y, d.z, depth, radius, settings.maxOffset, settings.springs, 0.35,
-    crunchFor(depth, (severity or depth / 0.1) * give), settings.maxCrunch)
+    crunchFor(depth, (severity or depth / (0.1 * body.scale)) * give), settings.maxCrunch * body.scale)
   body.dents = body.dents + 1
   body.lastDent = {x = p.x, y = p.y, z = p.z}
   body.fresh = true
   skin(body)
+  -- a wheel near the hit: bent, if the hit was deep enough
+  for k, W in ipairs(body.wheels) do
+    local dist = math.sqrt((p.x - W[1]) ^ 2 + (p.y - W[2]) ^ 2 + (p.z - W[3]) ^ 2)
+    local reach = W[6] * 1.6 + radius
+    if dist < reach and depth > W[6] * 0.25 then
+      bendWheel(body, k, d, math.min(0.05, (depth / W[6]) * 0.08) * (1 - dist / reach))
+    end
+  end
   return true
 end
 
@@ -938,7 +1062,7 @@ local function dentSide(body, side)
   local fromLocal = centre - d * 6
   local from, dirW = w:transformPoint(fromLocal), w:transformVector(d):normalize()
   local hit = hitCar(body, from, dirW) or w:transformPoint(centre - d * 1)
-  dentWorld(body, hit, dirW, settings.depth, settings.radius)
+  dentWorld(body, hit, dirW, settings.depth * body.scale, settings.radius * body.scale)
 end
 
 -- ---------------------------------------------------------------------------------------------
@@ -954,7 +1078,6 @@ end
 local IMPACT_ACCEL, IMPACT_WINDOW, MIN_HIT, COOLDOWN, FROM_BELOW = 30, 0.15, 2.5, 0.3, 0.15
 local STEP = 3  -- m/s: a hit still building gets more dent each time it's this much harder
 local crash = {}
-local function cross(ax, ay, az, bx, by, bz) return ay * bz - az * by, az * bx - ax * bz, ax * by - ay * bx end
 
 -- The car's spin over the last frame (rad/s, world), from its axes then and now: for a small turn by angle t
 -- about axis a, the sum of e x e' over three orthonormal axes is 2 t a.
@@ -982,12 +1105,12 @@ local function makeCrashDent(i, body, r, dir, speed, dvLen, along, from)
   local hit = hitCar(body, aim - dir * 6, dir) or (aim - dir * 1.0)
   -- (a hit still building: only what it adds to its dent so far)
   from = from or 0
-  local depth = math.min(settings.maxOffset, crashDepth(speed)) - (from > 0 and math.min(settings.maxOffset, crashDepth(from)) or 0)
+  local depth = (math.min(settings.maxOffset, crashDepth(speed)) - (from > 0 and math.min(settings.maxOffset, crashDepth(from)) or 0)) * body.scale
   if depth <= 0 then return end
   trace('crash: car %d, %.1f m/s at the contact (%.1f at the middle), %.2f m from the middle (along %.2f): dent %.3f m%s',
     i, speed, dvLen, r:length(), along, depth, from > 0 and (' more (was %.1f m/s)'):format(from) or '')
   -- harder hits go deeper, not wider (a wide dent looked like the whole corner hit from all sides)
-  dentWorld(body, hit, dir, depth, math.min(0.6, 0.35 + 0.01 * speed), speed / 12)
+  dentWorld(body, hit, dir, depth, math.min(0.6, 0.35 + 0.01 * speed) * body.scale, speed / 12)
   body.lastCrash = speed
   if from == 0 then body.crashes = (body.crashes or 0) + 1 end
 end
@@ -1266,7 +1389,7 @@ function script.update(dt)
     local ray = render.createMouseRay()
     local body = cars[i]
     local dist = body.node:findMeshes('?'):raycast(ray, false)
-    if dist and dist >= 0 then dentWorld(body, ray.pos + ray.dir * dist, ray.dir, settings.depth, settings.radius) end
+    if dist and dist >= 0 then dentWorld(body, ray.pos + ray.dir * dist, ray.dir, settings.depth * body.scale, settings.radius * body.scale) end
   end
   wasClick = click
   -- crashes: every car that's read, and (all cars on) every car in the session

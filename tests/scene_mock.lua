@@ -80,6 +80,10 @@ return function(opts)
     return b
   end
   H.buffer = buffer
+  -- opts.size: the whole car scaled (0.12: a model car half a metre long)
+  local S = opts.size or 1
+  H.size = S
+  local function sc(list) for _, v in ipairs(list) do v[1], v[2], v[3] = v[1] * S, v[2] * S, v[3] * S end return list end
   -- the fake car: a box 1.8 x 1.2 x 4.4 (y from 0), faces subdivided n x n
   local function boxSurface(n, sx, sy, sz)
     local list = {}
@@ -95,14 +99,14 @@ return function(opts)
     return list
   end
   H.bodyWorld = H.rotY(0.5, 100, 2, -50)  -- the car turned and moved
-  local doorLocal = H.rotY(math.pi / 2, 0.9, 0.6, 0.3)  -- a panel under a rotated child node
+  local doorLocal = H.rotY(math.pi / 2, 0.9 * S, 0.6 * S, 0.3 * S)  -- a panel under a rotated child node
   local nodes = {}
   local function node(name, world, parent) local n = {name = name, world = world, parent = parent, meshes = {}} nodes[#nodes + 1] = n return n end
   local root = node('carRoot:0', H.rotY(0))
   local body = node('BODYTR', H.bodyWorld, root)
   local door = node('DOOR', H.compose(H.bodyWorld, doorLocal), body)
-  H.bodyMesh = {name = 'body', parent = body, vertices = buffer(boxSurface(opts.n or 20, 1.8, 1.2, 4.4))}
-  H.doorMesh = {name = 'door', parent = door, vertices = buffer({{0, 0, 0, 1, 0, 0}, {0, 0.1, 0, 1, 0, 0}, {0.1, 0, 0, 1, 0, 0}})}
+  H.bodyMesh = {name = 'body', parent = body, vertices = buffer(boxSurface(opts.n or 20, 1.8 * S, 1.2 * S, 4.4 * S))}
+  H.doorMesh = {name = 'door', parent = door, vertices = buffer(sc({{0, 0, 0, 1, 0, 0}, {0, 0.1, 0, 1, 0, 0}, {0.1, 0, 0, 1, 0, 0}}))}
   body.meshes = {H.bodyMesh}
   door.meshes = {H.doorMesh}
   if opts.farMesh then  -- (as some cars have: a mesh hundreds of metres from the body, under BODYTR)
@@ -111,29 +115,42 @@ return function(opts)
   end
   -- not bodywork: the driver (by its node) and a gauge needle (by its name)
   local driver = node('DRIVER:DRIVER', H.bodyWorld, body)
-  H.driverMesh = {name = 'DRIVER:suit', parent = driver, vertices = buffer({{0, 0.5, 0, 0, 1, 0}, {0.1, 0.5, 0, 0, 1, 0}, {0, 0.6, 0, 0, 1, 0}})}
+  H.driverMesh = {name = 'DRIVER:suit', parent = driver, vertices = buffer(sc({{0, 0.5, 0, 0, 1, 0}, {0.1, 0.5, 0, 0, 1, 0}, {0, 0.6, 0, 0, 1, 0}}))}
   driver.meshes = {H.driverMesh}
-  H.needleMesh = {name = 'car_needle_speed', parent = body, vertices = buffer({{0, 0.7, 1, 0, 1, 0}, {0.01, 0.7, 1, 0, 1, 0}, {0, 0.71, 1, 0, 1, 0}})}
+  H.needleMesh = {name = 'car_needle_speed', parent = body, vertices = buffer(sc({{0, 0.7, 1, 0, 1, 0}, {0.01, 0.7, 1, 0, 1, 0}, {0, 0.71, 1, 0, 1, 0}}))}
   body.meshes[#body.meshes + 1] = H.needleMesh
   -- the interior: a door card 0.15 m in from the left (+x) side, facing the cabin, under COCKPIT_HR; and the
   -- steering wheel (left still)
   local cockpit = node('COCKPIT_HR', H.bodyWorld, body)
   local card = {}
   for a = 0, 10 do for b = 0, 10 do card[#card + 1] = {0.75, 0.3 + a * 0.05, -0.5 + b * 0.1, -1, 0, 0} end end
-  H.cardMesh = {name = 'door_card', parent = cockpit, vertices = buffer(card)}
+  H.cardMesh = {name = 'door_card', parent = cockpit, vertices = buffer(sc(card))}
   cockpit.meshes = {H.cardMesh}
   local steer = node('STEER_HR', H.bodyWorld, body)
-  H.steerMesh = {name = 'steering_wheel', parent = steer, vertices = buffer({{0.4, 0.8, 0.6, 0, 0, -1}, {0.3, 0.8, 0.6, 0, 0, -1}, {0.35, 0.9, 0.6, 0, 0, -1}})}
+  H.steerMesh = {name = 'steering_wheel', parent = steer, vertices = buffer(sc({{0.4, 0.8, 0.6, 0, 0, -1}, {0.3, 0.8, 0.6, 0, 0, -1}, {0.35, 0.9, 0.6, 0, 0, -1}}))}
   steer.meshes = {H.steerMesh}
   -- outside BODYTR, as some cars have them: a headlight lens on a node of its own (fixed to the body), and a
   -- wheel (moves on its own: left alone)
   H.lightsNode = node('LIGHTS', H.bodyWorld, root)
   local lens = {}
   for a = 0, 4 do for b = 0, 4 do lens[#lens + 1] = {0.4 + a * 0.05, 0.6 + b * 0.05, 2.19, 0, 0, 1} end end
-  H.lensMesh = {name = 'headlight_glass', parent = H.lightsNode, vertices = buffer(lens)}
+  H.lensMesh = {name = 'headlight_glass', parent = H.lightsNode, vertices = buffer(sc(lens))}
   H.lightsNode.meshes = {H.lensMesh}
-  local wheel = node('WHEEL_LF', H.compose(H.bodyWorld, H.rotY(0, 0.8, 0.3, 1.4)), root)
-  H.wheelMesh = {name = 'tyre_lf', parent = wheel, vertices = buffer({{0, 0, 0, 1, 0, 0}, {0, 0.1, 0, 1, 0, 0}, {0, 0, 0.1, 1, 0, 0}})}
+  local wheel = node('WHEEL_LF', H.compose(H.bodyWorld, H.rotY(0, 0.8 * S, 0.3 * S, 1.4 * S)), root)
+  H.wheelMesh = {name = 'tyre_lf', parent = wheel, vertices = buffer(sc({{0, 0, 0, 1, 0, 0}, {0, 0.1, 0, 1, 0, 0}, {0, 0, 0.1, 1, 0, 0}}))}
+  if opts.replacementWheel then
+    -- a wheel CSP put in from an extension's model, hanging under BODYTR with a name of its own: a ring 0.3 m
+    -- round (the tyre's 0.33), 0.2 m wide, on the front left hub
+    local ring = {}
+    for a = 0, 23 do
+      local t = a / 24 * 2 * math.pi
+      for _, x in ipairs({0.7, 0.8, 0.9}) do
+        ring[#ring + 1] = {x, 0.3 + 0.3 * math.cos(t), 1.4 + 0.3 * math.sin(t), 0, math.cos(t), math.sin(t)}
+      end
+    end
+    H.replWheel = {name = 'ext_wheel_fl_model', parent = body, vertices = buffer(sc(ring))}
+    body.meshes[#body.meshes + 1] = H.replWheel
+  end
   wheel.meshes = {H.wheelMesh}
   -- a second car (opts.cars = 2): the same box body, 30 m away, turned the other way
   H.body2World = H.rotY(-1.0, 130, 2, -50)
@@ -206,7 +223,7 @@ return function(opts)
     while p do if p.name == 'BODYTR' then bw = p.world break end p = p.parent end
     local inv = bw:inverse()
     local o, d = inv:transformPoint(ray.pos), inv:transformVector(ray.dir)
-    local bmin, bmax = {-0.9, 0, -2.2}, {0.9, 1.2, 2.2}
+    local bmin, bmax = {-0.9 * S, 0, -2.2 * S}, {0.9 * S, 1.2 * S, 2.2 * S}
     local t0, t1 = 0, ray.length or 1e9
     for a, k in ipairs({'x', 'y', 'z'}) do
       if math.abs(d[k]) < 1e-9 then
@@ -222,10 +239,11 @@ return function(opts)
   end
   -- the car (AC: wheels 0 front-left, 1 front-right; in the fake car's frame left is +x)
   local car = {look = H.bodyWorld:transformVector(vec3(0, 0, 1)), up = vec3(0, 1, 0), velocity = vec3(), collisionDepth = 0,
-    position = H.bodyWorld:transformPoint(vec3(0, 0.5, 0)),
-    wheels = {[0] = {position = H.bodyWorld:transformPoint(vec3(0.8, 0.3, 1.4))}, {position = H.bodyWorld:transformPoint(vec3(-0.8, 0.3, 1.4))}}}
-  car.distanceToCamera, car.isConnected, car.aabbSize = 5, true, vec3(1.8, 1.2, 4.4)
-  car.aabbCenter, car.bodyTransform = vec3(0, 0.6, 0), H.bodyWorld
+    position = H.bodyWorld:transformPoint(vec3(0, 0.5 * S, 0)),
+    wheels = {[0] = {position = H.bodyWorld:transformPoint(vec3(0.8 * S, 0.3 * S, 1.4 * S))}, {position = H.bodyWorld:transformPoint(vec3(-0.8 * S, 0.3 * S, 1.4 * S))}}}
+  if S ~= 1 then for w = 0, 1 do car.wheels[w].tyreRadius, car.wheels[w].tyreWidth = 0.33 * S, 0.25 * S end end
+  car.distanceToCamera, car.isConnected, car.aabbSize = 5, true, vec3(1.8 * S, 1.2 * S, 4.4 * S)
+  car.aabbCenter, car.bodyTransform = vec3(0, 0.6 * S, 0), H.bodyWorld
   H.car = car
   local car2 = {look = H.body2World:transformVector(vec3(0, 0, 1)), up = vec3(0, 1, 0), velocity = vec3(), collisionDepth = 0,
     position = H.body2World:transformPoint(vec3(0, 0.5, 0)), distanceToCamera = 30, isConnected = true, aabbSize = vec3(1.8, 1.2, 4.4),

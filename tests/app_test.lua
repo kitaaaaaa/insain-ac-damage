@@ -37,7 +37,7 @@ for _, m in ipairs(body.meshes) do if m.name == 'door' then door = m end end
 local expect = H.doorLocal:transformPoint(vec3(0.1, 0, 0))
 check(math.abs(door.px[2] - expect.x) < 1e-5 and math.abs(door.pz[2] - expect.z) < 1e-5, 'panel vertex in body space')
 -- min/max of the body box
-check(math.abs(body.min[3] - (-2.25)) < 1e-6 and math.abs(body.max[3] - 2.25) < 1e-6, 'bounds')
+check(math.abs(body.min[3] - (-2.2 - 0.05 * body.scale)) < 1e-6 and math.abs(body.max[3] - (2.2 + 0.05 * body.scale)) < 1e-6 and math.abs(body.scale - 4.4 / 4.5) < 1e-6, 'bounds, and the car\'s scale: ' .. body.scale)
 
 local function moved(buf, ref, filter)
   local n, maxd = 0, 0

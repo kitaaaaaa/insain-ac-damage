@@ -106,7 +106,14 @@ A second hit while it's still moving carries on from wherever it's got to.
 - **The wheel wells stay clear of the wheels**: the app knows where each wheel is and how big its tyre is, and
   keeps the bodywork out of the space each wheel needs (with room for the suspension to move, and at the
   front, for the steering). A crushed wing folds around the wheel instead of into it.
-- **Moving parts** (wheels, tyres, brakes, suspension, wipers) are left alone.
+- **Wheels** aren't bodywork: they're found by their names (wheels, rims, tyres) and also by their shape (a part
+  centred on a wheel's hub and about the size of its tyre), so wheels a CSP extension puts in, whatever they're
+  called, count as wheels too. A hard hit beside a wheel **bends** it: its parts tilt a few degrees about the
+  hub, so it wobbles as it turns, like a bent rim or axle. A repair straightens it.
+- **Other moving parts** (brakes, suspension, wipers) are left alone.
+- **Any size of car**: the hull's spacing, the size of dents, the crunch and the wheel spaces are all scaled to
+  the car, so a model car half a metre long dents like a full-size one, not as if hit by something its own
+  size.
 
 ### Finding crashes
 
@@ -230,6 +237,7 @@ luajit tests/noise_test.lua
 luajit tests/app_test.lua
 ATOMS=box luajit tests/app_test.lua
 luajit tests/cars_test.lua
+luajit tests/small_test.lua
 ```
 
 ## Credits
