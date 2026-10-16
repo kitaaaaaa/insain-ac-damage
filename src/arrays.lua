@@ -8,4 +8,7 @@ function M.ints(n, fill)
   if fill and fill ~= 0 then for i = 0, n - 1 do a[i] = fill end end
   return a
 end
+function M.bytes(n) return ffi.new('uint8_t[?]', math.max(n, 1)) end
+function M.doubles(n) return ffi.new('double[?]', math.max(n, 1)) end
+function M.zero(a, n, size) ffi.fill(a, math.max(n, 1) * (size or 1)) end
 return M

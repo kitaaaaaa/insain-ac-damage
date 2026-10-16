@@ -6,6 +6,21 @@ vertex of the body is pinned to the hull's triangles and follows them. 1nsane's 
 by hand; here the hull is built from the car's own meshes. Visual only: AC's physics and collisions don't
 change.
 
+## New in 0.7.1: performance with many damaged cars
+
+0.7.0 got slower with each damaged car. What grew with them:
+
+- **The detailed model**: every damaged car within 100 m was kept on its main model (with the dents), each
+  drawn in full detail. Now only the 3 nearest, within 60 m (settings: how many, how far, or off).
+- **Garbage collection**: each damaged car kept big Lua tables (which vertices had moved, which vertices sit
+  on which hull triangle), and every garbage collection walked all of them, so each car made every collection
+  slower. They're compact FFI arrays now, which the collector doesn't walk: a full collection with two heavily
+  dented 137,000-vertex cars went from 1.4 ms to 0.4 ms (offline). And watching for crashes on every car no
+  longer makes garbage every frame.
+- **The window shows what the app costs**: its milliseconds a frame (crash watching and background work apart),
+  Lua memory, and how many cars are kept detailed. If AC slows down while these stay small, the cost is in the
+  drawing (the detailed models: turn that off to see), not the app's work.
+
 ## New in 0.7.0: every car in the session
 
 - **Which cars**: the one you're watching, and every other car within 100 m of the camera (a setting), read
@@ -16,8 +31,8 @@ change.
   detailed car takes some 15-20 MB, not 50. An undamaged car that goes further than 150 m from the camera is let
   go (read again if it comes back); a damaged one is kept.
 - **Far away**: AC shows simpler models of far cars (LODs), and those don't have the dents: the dents are on the
-  car's main model. So a damaged car keeps its main model up to 100 m from the camera (a setting; it costs a
-  little drawing). Past that it shows AC's simpler model, without its dents.
+  car's main model. So a damaged car keeps its main model near the camera (0.7.1: the 3 nearest within 60 m; it
+  costs drawing time). Past that it shows AC's simpler model, without its dents.
 - Settings: **Every car in the session** (off: just the watched one, as before), how far to read, and the
   detailed-model distance.
 

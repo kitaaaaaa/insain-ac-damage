@@ -41,7 +41,8 @@ local settings = ac.storage{
   allCars = true,      -- every car in the session within readDistance, not just the watched one
   readDistance = 100,  -- metres from the camera
   keepDetailed = true, -- damaged cars keep their detailed model (the one with the dents) up to detailedDistance
-  detailedDistance = 100,
+  detailedDistance = 60,
+  detailedMax = 3,     -- ... for this many damaged cars at most, the nearest (each costs drawing time)
   method = 'direct',   -- how dents are shown: 'direct' (the car's own meshes changed) or 'copy' (our own copies
                        -- of the meshes, the originals hidden: createMesh crashed AC in test C)
   outsideBody = true,  -- also dent the car's meshes outside BODYTR (lights, glass, trim), unless on moving parts
@@ -199,7 +200,8 @@ local function setupCar(i)
         local bx, by, bz = toMesh(vec3(1, 0, 0)), toMesh(vec3(0, 1, 0)), toMesh(vec3(0, 0, 1))
         local mesh = {ref = ref, name = name, orig = verts, n = verts:size(), interior = kind == 'interior',  -- work: a copy made at the first dent
           px = arrays.floats(verts:size()), py = arrays.floats(verts:size()), pz = arrays.floats(verts:size()),
-          nx = arrays.floats(verts:size()), ny = arrays.floats(verts:size()), nz = arrays.floats(verts:size()), moved = {},
+          nx = arrays.floats(verts:size()), ny = arrays.floats(verts:size()), nz = arrays.floats(verts:size()),
+          moved = arrays.bytes(verts:size()), seen = arrays.ints(verts:size()),  -- (FFI: the GC doesn't walk them)
           toMesh = {bx.x, bx.y, bx.z, by.x, by.y, by.z, bz.x, bz.y, bz.z}}
         if item.outside then
           -- where its node sat on the body (its origin and two axes' ends), to tell if it moves after all
@@ -271,6 +273,14 @@ local function setupCar(i)
           if v % 300 == 0 then t0 = budget(t0) end
         end
       end
+    end
+    -- into FFI arrays: the GC doesn't walk them (as Lua tables, every damaged car's lists were rescanned by each
+    -- garbage collection, more of them the more cars)
+    for key, list in pairs(users) do
+      local a = arrays.doubles(#list)
+      for e = 1, #list do a[e - 1] = list[e] end
+      users[key] = {a = a, n = #list}
+      t0 = budget(t0)
     end
     body.users = users
     -- each body vertex's clearance: how far it is from the nearest interior vertex (it can't go in further than
@@ -387,8 +397,9 @@ local function skin(body)
       local started, work, count = nowMs(), 0, 0
       local l, isHull = body.atoms, body.kind == 'hull'
       local changed = {}
-      local seen = {}  -- (hull) a vertex is in up to two triangles' lists: once is enough
-      for mi = 1, #body.meshes do seen[mi] = {} end
+      -- (hull) a vertex is in up to two triangles' lists: once a pass is enough (mesh.seen: the pass it was done in)
+      body.pass = (body.pass or 0) + 1
+      local pass = body.pass
       if isHull then hull.begin(l) end
       local invBody = body.node:getWorldTransformationRaw():inverse()
       for _, mesh in ipairs(body.meshes) do
@@ -402,11 +413,12 @@ local function skin(body)
             mesh.moving = true
             if mesh.work then  -- all of it back as it was
               local r, o = mesh.work.raw, mesh.orig.raw
-              for v in pairs(mesh.moved) do
+              for v = 0, mesh.n - 1 do if mesh.moved[v] == 1 then
                 r[v].pos.x, r[v].pos.y, r[v].pos.z = o[v].pos.x, o[v].pos.y, o[v].pos.z
                 r[v].normal.x, r[v].normal.y, r[v].normal.z = o[v].normal.x, o[v].normal.y, o[v].normal.z
-              end
-              mesh.moved, mesh.movedCount = {}, 0
+              end end
+              arrays.zero(mesh.moved, mesh.n)
+              mesh.movedCount = 0
               changed[mesh] = true
             end
             trace('"%s" (outside BODYTR) moves on the body: not dented from now on', mesh.name)
@@ -422,18 +434,19 @@ local function skin(body)
       for key in pairs(isHull and hull.takeChanged(l) or lattice.takeChanged(l)) do
         local list = body.users[key]
         if list then
-          for e = 1, #list do
-            local mi = math.floor(list[e] / PACK)
-            local v = list[e] - mi * PACK
+          local la = list.a
+          for e = 0, list.n - 1 do
+            local packed = la[e]
+            local mi = math.floor(packed / PACK)
+            local v = packed - mi * PACK
             local mesh = body.meshes[mi]
-            local s = seen[mi]
-            if s[v] then mesh = nil else s[v] = true end
+            if mesh.seen[v] == pass then mesh = nil else mesh.seen[v] = pass end
             if mesh and mesh.moving then  -- a part that moves on its own: back as it was, and no more
-              if mesh.work and mesh.moved[v] then
+              if mesh.work and mesh.moved[v] == 1 then
                 local r, o = mesh.work.raw, mesh.orig.raw
                 r[v].pos.x, r[v].pos.y, r[v].pos.z = o[v].pos.x, o[v].pos.y, o[v].pos.z
                 r[v].normal.x, r[v].normal.y, r[v].normal.z = o[v].normal.x, o[v].normal.y, o[v].normal.z
-                mesh.moved[v] = nil
+                mesh.moved[v] = 0
                 mesh.movedCount = (mesh.movedCount or 1) - 1
                 changed[mesh] = true
               end
@@ -505,13 +518,13 @@ local function skin(body)
               local mx, my, mz = T[1] * qx + T[4] * qy + T[7] * qz, T[2] * qx + T[5] * qy + T[8] * qz, T[3] * qx + T[6] * qy + T[9] * qz
               local len = math.sqrt(mx * mx + my * my + mz * mz)
               if len > 0 then raw[v].normal.x, raw[v].normal.y, raw[v].normal.z = mx / len, my / len, mz / len end
-              if not mesh.moved[v] then mesh.movedCount = (mesh.movedCount or 0) + 1 end
-              mesh.moved[v] = true
+              if mesh.moved[v] == 0 then mesh.movedCount = (mesh.movedCount or 0) + 1 end
+              mesh.moved[v] = 1
               changed[mesh] = true
-            elseif raw and mesh.moved[v] then
+            elseif raw and mesh.moved[v] == 1 then
               raw[v].pos.x, raw[v].pos.y, raw[v].pos.z = orig[v].pos.x, orig[v].pos.y, orig[v].pos.z
               raw[v].normal.x, raw[v].normal.y, raw[v].normal.z = orig[v].normal.x, orig[v].normal.y, orig[v].normal.z
-              mesh.moved[v] = nil
+              mesh.moved[v] = 0
               mesh.movedCount = (mesh.movedCount or 1) - 1
               changed[mesh] = true
             end
@@ -544,7 +557,8 @@ local function restoreNow(body)
     elseif mesh.sent then
       mesh.ref:alterVertices(mesh.orig)
     end
-    mesh.sent, mesh.work, mesh.moved, mesh.failed, mesh.movedCount = nil, nil, {}, nil, 0
+    arrays.zero(mesh.moved, mesh.n)
+    mesh.sent, mesh.work, mesh.failed, mesh.movedCount = nil, nil, nil, 0
   end
 end
 -- unloading (AC closing, the app reloaded): the originals back
@@ -701,7 +715,8 @@ local function updateCrash(i, dt)
   local teleported = car.position:distanceSquared(c.prevPos) > 25
   local wx, wy, wz = spin(c, car, dt)
   if teleported then c.at = nil wx, wy, wz = c.w[1], c.w[2], c.w[3] end
-  local jump = (car.velocity - c.prevVel):length() / dt
+  local vel, pv = car.velocity, c.prevVel
+  local jump = math.sqrt((vel.x - pv.x) ^ 2 + (vel.y - pv.y) ^ 2 + (vel.z - pv.z) ^ 2) / dt
   local spinJump = math.sqrt((wx - c.w[1]) ^ 2 + (wy - c.w[2]) ^ 2 + (wz - c.w[3]) ^ 2) / dt * halfLen
   if not c.at and not teleported and c.cool == 0 and (jump + spinJump > IMPACT_ACCEL or car.collisionDepth > 0) then
     c.at, c.before, c.maxDv = 0, c.prevVel:clone(), vec3()
@@ -709,8 +724,9 @@ local function updateCrash(i, dt)
   end
   if c.at then
     c.at = c.at + dt
-    local dv = car.velocity - c.before
-    if dv:lengthSquared() > c.maxDv:lengthSquared() then c.maxDv:set(dv) end
+    local b = c.before
+    local ex, ey, ez = vel.x - b.x, vel.y - b.y, vel.z - b.z
+    if ex * ex + ey * ey + ez * ez > c.maxDv:lengthSquared() then c.maxDv:set(ex, ey, ez) end
     if c.at >= IMPACT_WINDOW then
       c.at = nil
       local up = car.up
@@ -840,12 +856,17 @@ end
 
 local function damaged(body) return body.dents > 0 end
 
+local detailedList, detailedDist = {}, {}
+local function byDistance(a, b) return detailedDist[a] < detailedDist[b] end
+local perf = {ms = 0, crashMs = 0, jobsMs = 0, detailed = 0}
+
 local function manageCars()
   local focused = sim.focusedCar
   if focused >= 0 and not cars[focused] then requestSetup(focused, true) end
   if not settings.allCars then return end
   local far = settings.readDistance * 1.5
   local nearest, nearestD
+  for k = #detailedList, 1, -1 do detailedList[k] = nil end
   for i = 0, (sim.carsCount or 1) - 1 do
     local car = ac.getCar(i)
     if car and car.isConnected ~= false then
@@ -853,16 +874,23 @@ local function manageCars()
       local body = cars[i]
       if not body and d < settings.readDistance and (not nearestD or d < nearestD) then nearest, nearestD = i, d end
       if body and i ~= focused and body.state == 'ready' and not damaged(body) and not pending[i] and d > far then letGo(i) end
-      if body and body.state == 'ready' and damaged(body) and settings.keepDetailed and d < settings.detailedDistance
-        and ac.forceDetailedCarLOD then
-        ac.forceDetailedCarLOD(i)
+      if body and body.state == 'ready' and damaged(body) and settings.keepDetailed and d < settings.detailedDistance then
+        detailedList[#detailedList + 1] = i
+        detailedDist[i] = d
       end
     end
   end
   if nearest and not readingNow() then requestSetup(nearest) end
+  -- the main model costs drawing time: kept only for the nearest few damaged cars
+  table.sort(detailedList, byDistance)
+  perf.detailed = math.min(#detailedList, settings.detailedMax)
+  if ac.forceDetailedCarLOD then
+    for k = 1, perf.detailed do ac.forceDetailedCarLOD(detailedList[k]) end
+  end
 end
 
 function script.update(dt)
+  local tStart = nowMs()
   local i = sim.focusedCar
   if settings.readWatched then manageCars() end
   -- Ctrl + left click on the car: a dent there, along the view
@@ -875,6 +903,7 @@ function script.update(dt)
   end
   wasClick = click
   -- crashes: every car that's read, and (all cars on) every car in the session
+  local tCrash = nowMs()
   if settings.crashDents and not sim.isPaused and not sim.isReplayActive then
     if settings.readWatched and settings.allCars then
       for ci = 0, (sim.carsCount or 1) - 1 do
@@ -888,9 +917,15 @@ function script.update(dt)
     -- not watching: forget the last frame, so the next one isn't compared with a stale one (a false crash)
     for ci in pairs(crash) do crash[ci] = nil end
   end
+  local tJobs = nowMs()
   applyPending()
   runJobs()
   sendQueued()
+  local tEnd = nowMs()
+  -- (smoothed) how long the app takes a frame: all of it, the crash watching, the background work
+  perf.ms = perf.ms + (tEnd - tStart - perf.ms) * 0.05
+  perf.crashMs = perf.crashMs + (tJobs - tCrash - perf.crashMs) * 0.05
+  perf.jobsMs = perf.jobsMs + (tEnd - tJobs - perf.jobsMs) * 0.05
 end
 
 local function slider(key, label, min, max, scale, integer)
@@ -1015,6 +1050,8 @@ function script.windowMain(dt)
   for _, b in pairs(cars) do if b.state == 'ready' then read = read + 1 if b.dents > 0 then dented = dented + 1 end end end
   local now = readingNow()
   ui.text(('Cars read: %d (%d dented)%s'):format(read, dented, now and (', reading car ' .. now) or ''))
+  ui.text(('App: %.2f ms a frame (crashes %.2f, background work %.2f); Lua memory %.0f MB; %d cars kept detailed'):format(
+    perf.ms, perf.crashMs, perf.jobsMs, collectgarbage('count') / 1024, perf.detailed))
   local body = cars[sim.focusedCar]
   if not body then
     ui.textWrapped('Reads the body of the car you are watching (a trace of each step goes to softdamage_trace.txt in '
@@ -1112,7 +1149,10 @@ function script.windowSettings(dt)
     slider('readDistance', 'Read cars within %.0f m of the camera', 20, 500)
   end
   if ui.checkbox('Damaged cars keep their detailed model', settings.keepDetailed) then settings.keepDetailed = not settings.keepDetailed end
-  if settings.keepDetailed then slider('detailedDistance', '... up to %.0f m', 20, 500) end
+  if settings.keepDetailed then
+    slider('detailedDistance', '... up to %.0f m', 20, 500)
+    slider('detailedMax', '... the nearest %.0f of them', 1, 20, 1, true)
+  end
   if ui.checkbox('Dent copies of the meshes (createMesh crashed AC in test C)', settings.method == 'copy') then
     settings.method = settings.method == 'copy' and 'direct' or 'copy'
   end
