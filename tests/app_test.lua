@@ -15,11 +15,14 @@ check(H.settle(), 'setup finishes')
 local f = io.open((os.getenv('TMPDIR') or '/tmp') .. '/softdamage_trace.txt')
 local traceText = f and f:read('*a') or ''
 if f then f:close() end
-check(traceText:find('app loaded', 1, true) and traceText:find('mesh 4/4: read', 1, true), 'trace written')
+check(traceText:find('app loaded', 1, true) and traceText:find('mesh %d+/%d+: read'), 'trace written')
 local body = H.state.cars[0]
 check(body and body.state == 'ready', 'ready: ' .. tostring(body and body.state))
-check(body.vertices == orig.n + 3 and #body.meshes == 2, 'both body meshes read: ' .. body.vertices)
-check(body.skipped == 2, 'driver and needle skipped: ' .. tostring(body.skipped))
+check(body.vertices == orig.n + 3 + H.cardMesh.vertices.n and #body.meshes == 3, 'body, panel and interior read: ' .. body.vertices)
+check(body.skipped == 3, 'driver, needle and steering wheel left still: ' .. tostring(body.skipped))
+local card
+for _, m in ipairs(body.meshes) do if m.name == 'door_card' then card = m end end
+check(card and card.interior, 'the cockpit is interior')
 check(body.forward == 1 and body.left == 1, 'forward +z, left +x (from the wheels)')
 -- the panel's vertices in body space: through its rotated node
 local door
@@ -52,7 +55,7 @@ press('front')
 local n, d = moved(H.bodyMesh.vertices, orig, function(p) return p.z > 2.2 - 0.6 end)
 check(n > 0, 'front dent moves vertices: ' .. n)
 check(n ~= -1, 'only at the front')
-check(math.abs(d - H.storage.depth) < 0.02, ('as deep as asked: %.3f'):format(d))
+check(math.abs(d - math.min(H.storage.depth * H.storage.frontGive, H.storage.maxBodyIn)) < 0.02, ('as deep as asked (front give, half a foot at most): %.3f'):format(d))
 local inward = true
 for i = 0, orig.n - 1 do
   local a, b = H.bodyMesh.vertices.raw[i].pos, orig.raw[i].pos
@@ -97,6 +100,44 @@ local dl = diff(lightSmooth, light)
 check(dl < d1 * 0.25, ('a light dent is much less crunchy: %.4f vs %.4f'):format(dl, d1))
 press('Repair')
 H.storage.depth, H.storage.crunch = 0.12, 1
+
+-- the front gives more than the sides (same test dent, smooth)
+H.storage.crunch, H.storage.depth = 0, 0.06
+press('front')
+local _, frontD = moved(H.bodyMesh.vertices, orig)
+press('Repair')
+press('left')
+local _, sideD = moved(H.bodyMesh.vertices, orig)
+press('Repair')
+check(frontD > sideD * 2, ('front %.3f m vs side %.3f m'):format(frontD, sideD))
+-- limits: a very deep crunchy dent on each side: the body half a foot at most, the interior a quarter, the
+-- steering wheel not at all; and the side panel stays outside the door card behind it
+local origCard, origSteer = H.cardMesh.vertices:copy(), H.steerMesh.vertices:copy()
+H.storage.crunch, H.storage.depth, H.storage.radius = 1, 0.5, 0.9
+local worstBody, worstCard, through = 0, 0, false
+for _, side in ipairs({'front', 'left', 'back', 'right', 'roof'}) do
+  press(side)
+  local _, b = moved(H.bodyMesh.vertices, orig)
+  local _, c = moved(H.cardMesh.vertices, origCard)
+  worstBody, worstCard = math.max(worstBody, b), math.max(worstCard, c)
+  if side == 'left' then
+    -- the wall (x = 0.9 at rest) in front of the card (y 0.3..0.8, z -0.5..0.5) vs the card's own x
+    local wallMin, cardMax = 1e9, -1e9
+    for i = 0, orig.n - 1 do
+      local o = orig.raw[i].pos
+      if o.x > 0.89 and o.y > 0.3 and o.y < 0.8 and o.z > -0.5 and o.z < 0.5 then wallMin = math.min(wallMin, H.bodyMesh.vertices.raw[i].pos.x) end
+    end
+    for i = 0, origCard.n - 1 do cardMax = math.max(cardMax, H.cardMesh.vertices.raw[i].pos.x) end
+    through = wallMin <= cardMax
+    check(not through, ('a deep side hit: the panel (x %.3f at the least) stays outside the door card (x %.3f at the most)'):format(wallMin, cardMax))
+    check(cardMax < 0.75 - 0.005, 'the door card moved in with it: ' .. cardMax)
+  end
+  press('Repair')
+end
+check(worstBody <= H.storage.maxBodyIn + 1e-5, ('the body moved %.4f m at most (limit %.4f)'):format(worstBody, H.storage.maxBodyIn))
+check(worstCard <= H.storage.maxInteriorIn + 1e-5 and worstCard > 0.01, ('the interior moved %.4f m at most (limit %.4f)'):format(worstCard, H.storage.maxInteriorIn))
+check(moved(H.steerMesh.vertices, origSteer) == 0, 'the steering wheel never moves')
+H.storage.depth, H.storage.radius = 0.12, 0.45
 
 -- left: the +x side
 press('Repair')
@@ -182,8 +223,8 @@ local function hitAt(speed)
   end
   return maxOff, maxCr
 end
-local o1, c1 = hitAt(8)
-local o2, c2 = hitAt(20)
+local o1, c1 = hitAt(5)
+local o2, c2 = hitAt(12)
 check(o2 > o1 * 1.5 and c2 > c1 * 1.5 and c2 <= H.storage.maxCrunch + 1e-9, ('harder hit (crunch capped at maxCrunch): deeper (%.3f vs %.3f) and crunchier (%.4f vs %.4f)'):format(o2, o1, c2, c1))
 press('Repair')
 

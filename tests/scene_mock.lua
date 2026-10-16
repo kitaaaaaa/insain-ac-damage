@@ -111,6 +111,16 @@ return function(opts)
   driver.meshes = {H.driverMesh}
   H.needleMesh = {name = 'car_needle_speed', parent = body, vertices = buffer({{0, 0.7, 1, 0, 1, 0}, {0.01, 0.7, 1, 0, 1, 0}, {0, 0.71, 1, 0, 1, 0}})}
   body.meshes[#body.meshes + 1] = H.needleMesh
+  -- the interior: a door card 0.15 m in from the left (+x) side, facing the cabin, under COCKPIT_HR; and the
+  -- steering wheel (left still)
+  local cockpit = node('COCKPIT_HR', H.bodyWorld, body)
+  local card = {}
+  for a = 0, 10 do for b = 0, 10 do card[#card + 1] = {0.75, 0.3 + a * 0.05, -0.5 + b * 0.1, -1, 0, 0} end end
+  H.cardMesh = {name = 'door_card', parent = cockpit, vertices = buffer(card)}
+  cockpit.meshes = {H.cardMesh}
+  local steer = node('STEER_HR', H.bodyWorld, body)
+  H.steerMesh = {name = 'steering_wheel', parent = steer, vertices = buffer({{0.4, 0.8, 0.6, 0, 0, -1}, {0.3, 0.8, 0.6, 0, 0, -1}, {0.35, 0.9, 0.6, 0, 0, -1}})}
+  steer.meshes = {H.steerMesh}
   local track = node('trackRoot:yes', H.rotY(0))
   H.trackMesh = {name = 'road', parent = track, vertices = buffer({{0, 0, 0, 0, 1, 0}, {1, 0, 0, 0, 1, 0}, {0, 0, 1, 0, 1, 0}})}
   track.meshes = {H.trackMesh}

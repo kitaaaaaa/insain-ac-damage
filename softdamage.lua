@@ -13,6 +13,13 @@ local settings = ac.storage{
   spacing = 0.35,      -- lattice: metres between atoms (applies on rebuild)
   springs = 2,         -- spring passes after each dent (0 = a dent stays exactly where it's pushed)
   maxOffset = 0.5,     -- how far an atom can be pushed in total
+  maxBodyIn = 0.1524,  -- the most any spot of the body moves (half a foot)
+  maxInteriorIn = 0.0762, -- the most any spot of the interior moves (a quarter foot)
+  interiorShare = 0.5, -- the interior moves this much of what the body around it does
+  frontGive = 1.5,     -- how much each way gives: the front (a crumple zone) most, the sides (door beams) least
+  rearGive = 1.2,
+  sideGive = 0.6,
+  roofGive = 0.8,
   crunch = 1,          -- crunchy damage: noise on dented metal, more the harder the hit (0 = smooth dents)
   crunchSize = 0.25,   -- metres: the size of the biggest creases (finer ones on top)
   crunchStyle = 'creases', -- 'creases' (ridged noise: sharp folds, like crumpled metal) or 'hammered' (bumps)
@@ -60,19 +67,23 @@ end
 -- yields when the frame's budget is used up
 local function budget(t0) if nowMs() - t0 > settings.budgetMs then t0 = coroutine.yield() end return t0 end
 
--- Parts that aren't bodywork, by AC's node names: the driver, the steering wheel, the cockpit, and gauge
--- needles (by name). CSP animates some of these itself.
-local function excludedPart(ref, meshName)
-  if meshName:lower():find('needle', 1, true) then return 'needle' end
+-- What a mesh is, by AC's node names: 'skip' for the driver, the steering wheel and gauge needles (they never
+-- move; CSP animates some of them), 'interior' for the cockpit (it moves a little with the body), or nil for
+-- bodywork. Returns the kind and the name that decided it.
+local function partKind(ref, meshName)
+  if meshName:lower():find('needle', 1, true) then return 'skip', 'needle' end
+  local interior
   local node = ref:getParent()
   for _ = 1, 12 do
     if node:size() == 0 then break end
     local n = node:name()
     if n == 'BODYTR' then break end
-    if n:find('^DRIVER') or n:find('^STEER_') or n:find('^COCKPIT_') or n:lower():find('needle', 1, true) then return n end
+    if n:find('^DRIVER') or n:find('^STEER_') or n:lower():find('needle', 1, true) then return 'skip', n end
+    if n:find('^COCKPIT_') then interior = n end
     node = node:getParent()
   end
-  if meshName:find('^DRIVER') or meshName:find('^STEER_') or meshName:find('^COCKPIT_') then return meshName end
+  if meshName:find('^DRIVER') or meshName:find('^STEER_') then return 'skip', meshName end
+  if interior or meshName:find('^COCKPIT_') then return 'interior', interior or meshName end
   return nil
 end
 
@@ -100,7 +111,8 @@ local function setupCar(i)
       local ref = meshes:at(m)
       local name = meshes:name(m)
       body.reading = ('%d/%d %s'):format(m, body.meshCount, name)
-      local skip = excludedPart(ref, name)
+      local kind, because = partKind(ref, name)
+      local skip = kind == 'skip' and because
       if skip then trace('mesh %d/%d "%s": skipped (%s)', m, body.meshCount, name, skip) body.skipped = (body.skipped or 0) + 1 end
       if not skip then trace('mesh %d/%d "%s": getVertices', m, body.meshCount, name) end
       local verts = not skip and ref:getVertices() or nil
@@ -115,7 +127,7 @@ local function setupCar(i)
         local ex, ey, ez = toBody(vec3(1, 0, 0)) - o, toBody(vec3(0, 1, 0)) - o, toBody(vec3(0, 0, 1)) - o
         local function toMesh(v) return invParent:transformVector(bodyWorld:transformVector(v)) end
         local bx, by, bz = toMesh(vec3(1, 0, 0)), toMesh(vec3(0, 1, 0)), toMesh(vec3(0, 0, 1))
-        local mesh = {ref = ref, name = name, orig = verts, n = verts:size(),  -- work: a copy made at the first dent
+        local mesh = {ref = ref, name = name, orig = verts, n = verts:size(), interior = kind == 'interior',  -- work: a copy made at the first dent
           px = {}, py = {}, pz = {}, nx = {}, ny = {}, nz = {}, moved = {},
           toMesh = {bx.x, bx.y, bx.z, by.x, by.y, by.z, bz.x, bz.y, bz.z}}
         local raw = verts.raw
@@ -161,6 +173,48 @@ local function setupCar(i)
       end
     end
     body.cells = cells
+    -- each body vertex's clearance: how far it is from the nearest interior vertex (it can't go in further than
+    -- that plus what the interior there gives), through a 0.1 m grid of the interior's vertices
+    local G = 0.1
+    local grid, interiorCount = {}, 0
+    local function key(x, y, z) return math.floor(x / G) * 73856093 + math.floor(y / G) * 19349663 + math.floor(z / G) * 83492791 end
+    for _, mesh in ipairs(body.meshes) do
+      if mesh.interior then
+        interiorCount = interiorCount + mesh.n
+        for v = 0, mesh.n - 1 do
+          local k = key(mesh.px[v], mesh.py[v], mesh.pz[v])
+          local list = grid[k]
+          if not list then list = {} grid[k] = list end
+          list[#list + 1] = mesh.px[v] list[#list + 1] = mesh.py[v] list[#list + 1] = mesh.pz[v]
+          if v % 4000 == 0 then t0 = budget(t0) end
+        end
+      end
+    end
+    body.interiorVertices = interiorCount
+    local REACH = 3  -- cells searched each way: 0.3 m (further than that, the body's own limit is the tighter one)
+    for _, mesh in ipairs(body.meshes) do
+      if not mesh.interior then
+        mesh.clear = {}
+        for v = 0, mesh.n - 1 do
+          local x, y, z = mesh.px[v], mesh.py[v], mesh.pz[v]
+          local best = 1e9
+          if interiorCount > 0 then
+            local cx, cy, cz = math.floor(x / G), math.floor(y / G), math.floor(z / G)
+            for dz = -REACH, REACH do for dy = -REACH, REACH do for dx = -REACH, REACH do
+              local list = grid[(cx + dx) * 73856093 + (cy + dy) * 19349663 + (cz + dz) * 83492791]
+              if list then
+                for e = 1, #list, 3 do
+                  local d2 = (list[e] - x) ^ 2 + (list[e + 1] - y) ^ 2 + (list[e + 2] - z) ^ 2
+                  if d2 < best then best = d2 end
+                end
+              end
+            end end end
+          end
+          mesh.clear[v] = math.sqrt(best)
+          if v % 500 == 0 then t0 = budget(t0) end
+        end
+      end
+    end
     -- which ways are forward and left in body space (from the car's heading, and its front-left and
     -- front-right wheels: AC's wheels 0 and 1)
     local car = ac.getCar(i)
@@ -237,6 +291,7 @@ local function skin(body)
       local crunchFn = settings.crunchStyle == 'hammered' and noise.fbm or noise.ridged
       local cf, no = 1 / settings.crunchSize, body.noiseOffset
       local withGrad = noise.withGrad
+      local share, maxBody, maxInterior, maxCrunch = settings.interiorShare, settings.maxBodyIn, settings.maxInteriorIn, settings.maxCrunch
       for cell in pairs(lattice.takeChanged(l)) do
         local list = body.cells[cell]
         if list then
@@ -252,6 +307,28 @@ local function skin(body)
             if raw then ox, oy, oz, ax, ay, az, bx, by, bz, cx, cy, cz, crunch = lattice.sample(l, mesh.px[v], mesh.py[v], mesh.pz[v]) end
             if ox then
               local nx0, ny0, nz0 = mesh.nx[v], mesh.ny[v], mesh.nz[v]
+              if mesh.interior then  -- the interior: a share of what the body does
+                local k = share
+                ox, oy, oz, crunch = ox * k, oy * k, oz * k, crunch * k
+                ax, ay, az, bx, by, bz, cx, cy, cz = ax * k, ay * k, az * k, bx * k, by * k, bz * k, cx * k, cy * k, cz * k
+              end
+              -- how far it may move: the interior a quarter foot; the body half a foot, and only as far as closes
+              -- the gap to the interior behind it. The same dent moves the interior there `share` as much (up to
+              -- its own limit), so the body may move L with L - min(maxInterior, share L) <= its clearance.
+              -- Beyond that the metal crumples instead: the excess goes to the crunch
+              local limit = maxInterior
+              if not mesh.interior then
+                local c = math.max(0, mesh.clear[v] - 0.015)
+                local L = c / (1 - share)
+                if share * L > maxInterior then L = c + maxInterior end
+                limit = math.min(maxBody, L)
+              end
+              local len = math.sqrt(ox * ox + oy * oy + oz * oz)
+              if len > limit then
+                local k = limit / len
+                ox, oy, oz = ox * k, oy * k, oz * k
+                crunch = math.min(maxCrunch, crunch + (len - limit) * 0.3)
+              end
               local qx, qy, qz = lattice.bendNormal(nx0, ny0, nz0, ax, ay, az, bx, by, bz, cx, cy, cz)
               -- crunch: the metal pushed in and out along its surface's normal by noise (creases ~crunchSize and
               -- finer), as much as the crunch there; the normal tilts with the noise's slope
@@ -260,6 +337,9 @@ local function skin(body)
                 local nn, gx, gy, gz = withGrad(crunchFn, mesh.px[v] * f + no[1], mesh.py[v] * f + no[2], mesh.pz[v] * f + no[3], 3, 0.5, 0.05)
                 local d = crunch * nn
                 ox, oy, oz = ox + nx0 * d, oy + ny0 * d, oz + nz0 * d
+                -- the crunch doesn't take it past its limit either
+                local l2 = ox * ox + oy * oy + oz * oz
+                if l2 > limit * limit then local k = limit / math.sqrt(l2) ox, oy, oz = ox * k, oy * k, oz * k end
                 gx, gy, gz = gx * f * crunch, gy * f * crunch, gz * f * crunch  -- slope of the surface, per metre
                 local gn = gx * nx0 + gy * ny0 + gz * nz0
                 qx, qy, qz = qx - (gx - gn * nx0), qy - (gy - gn * ny0), qz - (gz - gn * nz0)
@@ -335,8 +415,13 @@ local function dentWorld(body, worldPos, worldDir, depth, radius, severity)
   local inv = w:inverse()
   local p = inv:transformPoint(worldPos)
   local d = inv:transformVector(worldDir):normalize()
+  -- how much this way gives: pushed backwards (hit in the front), forwards (from behind), sideways, down
+  local along = d.z * body.forward  -- > 0: pushed forwards (a hit from behind)
+  local give = (along < 0 and settings.frontGive or settings.rearGive) * d.z * d.z + settings.sideGive * d.x * d.x
+    + settings.roofGive * d.y * d.y
+  depth = depth * give
   lattice.dent(body.lattice, p.x, p.y, p.z, d.x, d.y, d.z, depth, radius, settings.maxOffset, settings.springs, 0.35,
-    crunchFor(depth, severity or depth / 0.1), settings.maxCrunch)
+    crunchFor(depth, (severity or depth / 0.1) * give), settings.maxCrunch)
   body.dents = body.dents + 1
   body.lastDent = {x = p.x, y = p.y, z = p.z}
   skin(body)
@@ -582,8 +667,10 @@ function script.windowMain(dt)
   if body.error then ui.textColored('Error: ' .. body.error, rgbm(1, 0.4, 0.3, 1)) end
   if body.lattice then
     local l = body.lattice
-    ui.text(('%d meshes (of %d; %d not bodywork), %d vertices; lattice %d x %d x %d'):format(#body.meshes,
-      body.meshCount or 0, body.skipped or 0, body.vertices, l.n[1], l.n[2], l.n[3]))
+    local interior = 0
+    for _, m in ipairs(body.meshes) do if m.interior then interior = interior + 1 end end
+    ui.text(('%d meshes (%d interior; of %d, %d left still), %d vertices; lattice %d x %d x %d'):format(#body.meshes,
+      interior, body.meshCount or 0, body.skipped or 0, body.vertices, l.n[1], l.n[2], l.n[3]))
     ui.text(('Setup %.0f ms. Last re-skin: %d vertices, %.0f ms of work over %.0f ms.'):format(body.setupMs,
       body.lastSkinCount or 0, body.lastSkinMs or 0, body.lastSkinSpan or 0))
     ui.text(('Dents: %d (%d from crashes%s)'):format(body.dents, body.crashes or 0,
@@ -620,6 +707,13 @@ function script.windowMain(dt)
 end
 
 function script.windowSettings(dt)
+  slider('frontGive', 'Front gives: %.0f%%', 20, 300, 100)
+  slider('rearGive', 'Rear gives: %.0f%%', 20, 300, 100)
+  slider('sideGive', 'Sides give: %.0f%%', 20, 300, 100)
+  slider('roofGive', 'Roof gives: %.0f%%', 20, 300, 100)
+  slider('maxBodyIn', 'Body moves at most: %.3f m', 0.03, 0.5)
+  slider('maxInteriorIn', 'Interior moves at most: %.3f m', 0, 0.3)
+  slider('interiorShare', 'Interior moves %.0f%% of the body', 0, 90, 100)
   slider('springs', 'Spring passes: %.0f', 0, 6, 1, true)
   slider('maxOffset', 'Most an atom moves: %.2f m', 0.1, 1)
   slider('spacing', 'Atom spacing: %.2f m (rebuild)', 0.15, 0.8)

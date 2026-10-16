@@ -28,6 +28,18 @@ if AC crashes, the file's last line shows where.
 - **Ctrl + left click** on the car dents it there, along the view.
 - Going back to the pits, or being reset, repairs the car.
 
+## Which way, how far
+
+- **Each way gives differently**: a dent's depth is scaled by the way the car was pushed, in its own frame:
+  the front 150% (a crumple zone), the rear 120%, the roof 80%, the sides 60% (door beams). Sliders.
+- **The interior** (the cockpit: AC's `COCKPIT_HR` / `COCKPIT_LR` nodes) moves with the body, half as much.
+  The driver, the steering wheel and gauge needles don't move at all.
+- **Limits**: a spot of the body moves at most half a foot (0.15 m), a spot of the interior a quarter foot
+  (0.076 m). And the body doesn't go through the interior: at setup, each body vertex finds its clearance (the
+  nearest interior vertex), and it moves only as far as closes that gap, counting the interior there moving
+  with it. What a hit asks beyond a limit goes to the crunch, so the metal crumples against the interior
+  instead. Sliders for all three.
+
 ## Crunch
 
 Dented metal is crumpled with 3D Perlin noise: each dented vertex moves in and out along its surface's normal
