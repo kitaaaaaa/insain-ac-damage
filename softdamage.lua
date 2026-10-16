@@ -24,8 +24,9 @@ local settings = ac.storage{
   squashLimit = 0.5,   -- and squashes to this at most (1nsane's own limits were 1.5 and 0.5)
   foldAt = 0.9,        -- squashed past this, the metal folds: crunch from the squeeze
   foldCrunch = 1,      -- metres of crunch per metre squashed past foldAt (times the crunch setting)
-  maxOffset = 0.5,     -- how far an atom can be pushed in total
-  maxBodyIn = 0.1524,  -- the most any spot of the body moves (half a foot)
+  maxOffset = 3,       -- how far an atom can be pushed in total (3: unlimited)
+  maxBodyIn = 3,       -- the most any spot of the body moves (3: unlimited)
+  interiorBlocks = true, -- the body doesn't go through the interior: it crumples against it
   maxInteriorIn = 0.0762, -- the most any spot of the interior moves (a quarter foot)
   interiorShare = 0.5, -- the interior moves this much of what the body around it does
   frontGive = 1.5,     -- how much each way gives: the front (a crumple zone) most, the sides (door beams) least
@@ -420,6 +421,43 @@ local function setupCar(i)
         end
       end
     end
+    -- the wheels, so the wheel wells stay clear of them: each a cylinder across the car (body space, at rest),
+    -- a little bigger than the tyre for the suspension's travel, and wider at the front for the steering. A
+    -- body vertex near one keeps how far it was into that space at rest (most: none), no further
+    body.wheels = {}
+    local carNow = ac.getCar(i)
+    for w = 0, 3 do
+      local wh = carNow and carNow.wheels and carNow.wheels[w]
+      if wh and wh.position then
+        local p = invBody:transformPoint(wh.position)
+        local r = (wh.tyreRadius and wh.tyreRadius > 0.1) and wh.tyreRadius or 0.33
+        local hw = ((wh.tyreWidth and wh.tyreWidth > 0.05) and wh.tyreWidth or 0.25) / 2
+        body.wheels[#body.wheels + 1] = {p.x, p.y, p.z, r + 0.07, hw + (w < 2 and 0.1 or 0.04)}
+      end
+    end
+    for _, mesh in ipairs(body.meshes) do
+      if not mesh.interior and #body.wheels > 0 then
+        local near = 0
+        for v = 0, mesh.n - 1 do
+          local x, y, z = mesh.px[v], mesh.py[v], mesh.pz[v]
+          for k, W in ipairs(body.wheels) do
+            local ax = math.abs(x - W[1])
+            local dyz = math.sqrt((y - W[2]) ^ 2 + (z - W[3]) ^ 2)
+            if ax < W[5] + 0.4 and dyz < W[4] + 0.4 then
+              if not mesh.wheelI then mesh.wheelI, mesh.wheelPen = arrays.bytes(mesh.n), arrays.floats(mesh.n) end
+              -- which wheel (and which side of it: 1 or 2 more than 4 for the inner side), and how far into its
+              -- space the vertex is at rest
+              mesh.wheelI[v] = k + ((x - W[1]) * (W[1] >= 0 and 1 or -1) < 0 and 4 or 0)
+              mesh.wheelPen[v] = math.max(0, math.min(W[5] - ax, W[4] - dyz))
+              near = near + 1
+              break
+            end
+          end
+          if v % 2000 == 0 then t0 = budget(t0) end
+        end
+        if near > 0 then trace('"%s": %d vertices by the wheels', mesh.name, near) end
+      end
+    end
     -- which ways are forward and left in body space (from the car's heading, and its front-left and
     -- front-right wheels: AC's wheels 0 and 1)
     local car = ac.getCar(i)
@@ -501,8 +539,13 @@ local function crunchVertex(ctx, mesh, v, ox, oy, oz, qx, qy, qz, crunch, limit)
     mesh.noiseVer[v] = ctx.noiseVer
   end
   local nx0, ny0, nz0 = mesh.nx[v], mesh.ny[v], mesh.nz[v]
+  -- along the way the metal was pushed (its surface's normal where it hardly moved): along each vertex's own
+  -- normal, round parts (tubes, bars) went in and out all round, and looked swollen
   local d = crunch * cache[n4]
-  ox, oy, oz = ox + nx0 * d, oy + ny0 * d, oz + nz0 * d
+  local ol = math.sqrt(ox * ox + oy * oy + oz * oz)
+  local ux, uy, uz = nx0, ny0, nz0
+  if ol > 0.005 then ux, uy, uz = ox / ol, oy / ol, oz / ol end
+  ox, oy, oz = ox + ux * d, oy + uy * d, oz + uz * d
   -- the crunch doesn't take it past its limit either
   local l2 = ox * ox + oy * oy + oz * oz
   local k = l2 > limit * limit and limit / math.sqrt(l2) or 1
@@ -546,16 +589,14 @@ local function skinVertex(ctx, mesh, v)
     if ql < 1e-9 then ql = 1 end
     qx, qy, qz = qx / ql, qy / ql, qz / ql
   end
-  -- how far it may move: the interior a quarter foot; the body half a foot, and only as far as closes the gap to
-  -- the interior behind it. The same dent moves the interior there `share` as much (up to its own limit), so the
-  -- body may move L with L - min(maxInterior, share L) <= its clearance. Beyond that the metal crumples instead:
-  -- the excess goes to the crunch
+  -- how far it may move: the interior a quarter foot; the body as far as it's pushed (or a setting), but not
+  -- through the interior behind it. Beyond that the metal crumples instead: the excess goes to the crunch
   local limit = maxInterior
   if not mesh.interior then
-    local c = math.max(0, mesh.clear[v] - 0.015)
-    local L = c / (1 - share)
-    if share * L > maxInterior then L = c + maxInterior end
-    limit = math.min(ctx.maxBody, L)
+    limit = ctx.maxBody
+    -- not through the interior: only as far as closes the gap to it (less 1.5 cm). The interior there moves in
+    -- with the body too, so the gap's only ever bigger than that
+    if ctx.interiorBlocks then limit = math.min(limit, math.max(0, mesh.clear[v] - 0.015)) end
   end
   local len = math.sqrt(ox * ox + oy * oy + oz * oz)
   local k = len > limit and limit / len or 1
@@ -564,6 +605,30 @@ local function skinVertex(ctx, mesh, v)
   -- crunch: the metal pushed in and out along its surface's normal by noise (creases ~crunchSize and finer), as
   -- much as the crunch there; the normal tilts with the noise's slope
   if crunch > 1e-4 then ox, oy, oz, qx, qy, qz = crunchVertex(ctx, mesh, v, ox, oy, oz, qx, qy, qz, crunch, limit) end
+  -- the wheel wells: not into the wheels' space (deeper than it was at rest): back out the shorter way, sideways
+  -- or out from the axle
+  local wi = mesh.wheelI and mesh.wheelI[v] or 0
+  if wi > 0 then
+    -- the side of the wheel the vertex started on: going in from there counts all the way through (a panel
+    -- pushed right through the tyre is in it, not out the other side)
+    local inner = wi > 4
+    local W = ctx.wheels[inner and wi - 4 or wi]
+    local out = (W[1] >= 0 and 1 or -1) * (inner and -1 or 1)  -- which way is out, across the car
+    local x, y, z = mesh.px[v] + ox, mesh.py[v] + oy, mesh.pz[v] + oz
+    local dx, ry, rz = x - W[1], y - W[2], z - W[3]
+    local dyz = math.sqrt(ry * ry + rz * rz)
+    local side, round = W[5] - dx * out, W[4] - dyz  -- how far in, each way
+    local allowed = mesh.wheelPen[v]
+    if side > allowed and round > allowed then
+      if round < side and dyz > 1e-6 then
+        local k = (W[4] - allowed) / dyz
+        y, z = W[2] + ry * k, W[3] + rz * k
+      else
+        x = W[1] + out * (W[5] - allowed)
+      end
+      ox, oy, oz = x - mesh.px[v], y - mesh.py[v], z - mesh.pz[v]
+    end
+  end
   -- the offset and normal into the mesh's own space
   local T = mesh.toMesh
   local r = raw[v]
@@ -620,9 +685,10 @@ local function skin(body)
       -- size changes
       local key = settings.crunchStyle .. settings.crunchSize
       if body.noiseKey ~= key then body.noiseKey, body.noiseVer = key, (body.noiseVer or 0) % 255 + 1 end
-      local ctx = {isHull = isHull, l = l, share = settings.interiorShare, maxBody = settings.maxBodyIn,
+      local ctx = {isHull = isHull, l = l, share = settings.interiorShare, interiorBlocks = settings.interiorBlocks,
+        maxBody = settings.maxBodyIn >= 2.99 and 1e9 or settings.maxBodyIn,
         maxInterior = settings.maxInteriorIn, maxCrunch = settings.maxCrunch, crunchFn = crunchFn,
-        cf = 1 / settings.crunchSize, no = body.noiseOffset, noiseVer = body.noiseVer}
+        cf = 1 / settings.crunchSize, no = body.noiseOffset, noiseVer = body.noiseVer, wheels = body.wheels}
       -- nearest the dent first: what's there shows in the first frame, the edges after
       local keys = {}
       for key in pairs(isHull and hull.takeChanged(l) or lattice.takeChanged(l)) do keys[#keys + 1] = key end
@@ -829,7 +895,8 @@ local function makeCrashDent(i, body, r, dir, speed, dvLen, along, from)
   if depth <= 0 then return end
   trace('crash: car %d, %.1f m/s at the contact (%.1f at the middle), %.2f m from the middle (along %.2f): dent %.3f m%s',
     i, speed, dvLen, r:length(), along, depth, from > 0 and (' more (was %.1f m/s)'):format(from) or '')
-  dentWorld(body, hit, dir, depth, 0.35 + 0.025 * speed, speed / 12)
+  -- harder hits go deeper, not wider (a wide dent looked like the whole corner hit from all sides)
+  dentWorld(body, hit, dir, depth, math.min(0.6, 0.35 + 0.01 * speed), speed / 12)
   body.lastCrash = speed
   if from == 0 then body.crashes = (body.crashes or 0) + 1 end
 end
@@ -941,6 +1008,14 @@ local function updateCrash(i, dt)
       local r, rl, dir, speed, dvLen, ax, ay, az = crashHit(car, body, ready, c, wx, wy, wz, L, Wd, Hd)
       if speed and speed > MIN_HIT and dvLen > 1e-3 and speed >= c.dented + (c.dented > 0 and STEP or 0) then
         if ready then
+          -- one impact, one place and one way: what it adds as it builds goes where the first dent went
+          local W = body.node:getWorldTransformationRaw()
+          if c.dented == 0 then
+            local inv = W:inverse()
+            c.hitR, c.hitDir = inv:transformVector(r), inv:transformVector(dir)
+          else
+            r, dir = W:transformVector(c.hitR), W:transformVector(c.hitDir):normalize()
+          end
           crashDent(i, body, r, dir, speed, dvLen, rl.z, c.dented)
         elseif i == sim.focusedCar or totalVertices() < settings.maxVertices then
           -- not read yet: kept in the car's axes, and the car read first of all
@@ -1322,7 +1397,8 @@ function script.windowSettings(dt)
   slider('sideGive', 'Doors give (pushed sideways): %.0f%%', 20, 300, 100)
   slider('endGive', 'Quarters give (sideways, at the ends): %.0f%%', 20, 300, 100)
   slider('roofGive', 'Roof gives: %.0f%%', 20, 300, 100)
-  slider('maxBodyIn', 'Body moves at most: %.3f m', 0.03, 0.5)
+  slider('maxBodyIn', settings.maxBodyIn >= 2.99 and 'Body moves at most: unlimited' or 'Body moves at most: %.2f m', 0.03, 3)
+  if ui.checkbox('The body crumples against the interior, not through it', settings.interiorBlocks) then settings.interiorBlocks = not settings.interiorBlocks end
   slider('maxInteriorIn', 'Interior moves at most: %.3f m', 0, 0.3)
   slider('interiorShare', 'Interior moves %.0f%% of the body', 0, 90, 100)
   slider('springs', 'Spring passes: %.0f', 0, 6, 1, true)
@@ -1333,7 +1409,7 @@ function script.windowSettings(dt)
     slider('foldAt', 'Folds when squashed past %.2fx', 0.5, 1.0)
     slider('foldCrunch', 'Fold crunch: %.0f%%', 0, 300, 100)
   end
-  slider('maxOffset', 'Most an atom moves: %.2f m', 0.1, 1)
+  slider('maxOffset', settings.maxOffset >= 2.99 and 'Most an atom moves: unlimited' or 'Most an atom moves: %.2f m', 0.1, 3)
   local kinds = {'hull', 'box'}
   local pickKind = ui.combo('Atoms (rebuild)', settings.atoms == 'box' and 2 or 1, ui.ComboFlags.None,
     {'Car-shaped hull (1nsane)', 'Box lattice (0.4)'})

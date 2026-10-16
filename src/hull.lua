@@ -254,6 +254,13 @@ function M.new(meshes, min, max, ringSpacing, around, tick)
     local e2x, e2y, e2z = ax[c] - ax[a], ay[c] - ay[a], az[c] - az[a]
     h.rcx[t], h.rcy[t], h.rcz[t] = e1y * e2z - e1z * e2y, e1z * e2x - e1x * e2z, e1x * e2y - e1y * e2x
   end
+  -- and its normal at rest (unit)
+  h.rnx, h.rny, h.rnz = {}, {}, {}
+  for t = 0, nt - 1 do
+    local l = sqrt(h.rcx[t] ^ 2 + h.rcy[t] ^ 2 + h.rcz[t] ^ 2)
+    if l < 1e-12 then l = 1 end
+    h.rnx[t], h.rny[t], h.rnz[t] = h.rcx[t] / l, h.rcy[t] / l, h.rcz[t] / l
+  end
   h.dx, h.dy, h.dz, h.cr, h.on = {}, {}, {}, {}, {}
   M.reset(h)
   h.changed = {}
@@ -351,7 +358,9 @@ function M.bind(h, b, i, px, py, pz, nx, ny, nz)
       local cx, cy, cz = h.rcx[t], h.rcy[t], h.rcz[t]
       local u, v, hh, c2 = coords(h, t, px, py, pz)
       b.bt[base + j], b.bw[base + j] = t, w
-      b.bu[base + j], b.bv[base + j], b.bh[base + j] = u, v, hh
+      -- the height in metres along the triangle's normal (1nsane scaled it with the triangle's area, so parts
+      -- standing off the body, like tubes, swelled as a triangle stretched; this way they keep their size)
+      b.bu[base + j], b.bv[base + j], b.bh[base + j] = u, v, hh * sqrt(c2)
       -- the normal in the triangle's frame (f1 along ab, fn its normal, f2 = fn x f1)
       local l1, ln = sqrt(e1x * e1x + e1y * e1y + e1z * e1z), sqrt(c2)
       local f1x, f1y, f1z = e1x / l1, e1y / l1, e1z / l1
@@ -385,7 +394,6 @@ function prep(h, t)
   local e1x, e1y, e1z = ax[b] + dx[b] - Ax, ay[b] + dy[b] - Ay, az[b] + dz[b] - Az
   local e2x, e2y, e2z = ax[c] + dx[c] - Ax, ay[c] + dy[c] - Ay, az[c] + dz[c] - Az
   local cx, cy, cz = e1y * e2z - e1z * e2y, e1z * e2x - e1x * e2z, e1x * e2y - e1y * e2x
-  h.dcx[t], h.dcy[t], h.dcz[t] = cx - h.rcx[t], cy - h.rcy[t], cz - h.rcz[t]
   local l1 = sqrt(e1x * e1x + e1y * e1y + e1z * e1z)
   local ln = sqrt(cx * cx + cy * cy + cz * cz)
   if l1 < 1e-9 or ln < 1e-12 then  -- crushed flat: keep the rest frame
@@ -399,6 +407,7 @@ function prep(h, t)
   local fnx, fny, fnz = cx / ln, cy / ln, cz / ln
   h.f1x[t], h.f1y[t], h.f1z[t] = f1x, f1y, f1z
   h.fnx[t], h.fny[t], h.fnz[t] = fnx, fny, fnz
+  h.dcx[t], h.dcy[t], h.dcz[t] = fnx - h.rnx[t], fny - h.rny[t], fnz - h.rnz[t]  -- the normal's change
   h.f2x[t], h.f2y[t], h.f2z[t] = fny * f1z - fnz * f1y, fnz * f1x - fnx * f1z, fnx * f1y - fny * f1x
   h.stamp[t] = h.pass
 end
@@ -410,7 +419,8 @@ local function slot(h, b, k)
   local w, u, v, hh = b.bw[k], b.bu[k], b.bv[k], b.bh[k]
   local a, bb, c = h.ta[t], h.tb[t], h.tc[t]
   local dx, dy, dz, cr = h.dx, h.dy, h.dz, h.cr
-  -- (a' + u e1' + v e2' + h c') - (a + u e1 + v e2 + h c): the atoms' offsets mixed, and the cross product's change
+  -- (a' + u e1' + v e2' + h n') - (a + u e1 + v e2 + h n): the atoms' offsets mixed, and the normal's change
+  -- times the height (metres)
   local wa = 1 - u - v
   local c1, c2, c3 = w * b.b1[k], w * b.b2[k], w * b.b3[k]
   -- the crunch: the atoms' mixed inside the triangle (clamped to it)
@@ -512,7 +522,7 @@ function M.dent(h, px, py, pz, dirx, diry, dirz, depth, radius, maxOffset, sprin
     local most, pin = 0, {}
     for _, n in ipairs(region) do if (w[n] or 0) > most then most = w[n] end end
     if most > 1e-9 then for _, n in ipairs(region) do pin[n] = math.min(1, (w[n] or 0) / most) end end
-    moved = moved + M.relax(h, pin, maxOffset, maxCrunch)
+    moved = moved + M.relax(h, pin, maxOffset, maxCrunch, dirx, diry, dirz)
   end
   if moved > 0 then h.dirty = true end
   return moved
@@ -523,14 +533,14 @@ end
 -- crunch, `foldCrunch` metres per metre squashed past that. nil turns the limits off.
 function M.setLimits(h, stretch, squash, fold, foldCrunch, iterations)
   if not stretch then h.limits = nil return end
-  h.limits = {stretch = stretch, squash = squash, fold = fold or 1, foldCrunch = foldCrunch or 0, iterations = iterations or 10}
+  h.limits = {stretch = stretch, squash = squash, fold = fold or 1, foldCrunch = foldCrunch or 0, iterations = iterations or 60}
 end
 
 -- Keeps every edge within its limits: an edge stretched or squashed too far moves its atoms back within them
 -- (a few passes over all of them, each correction shared by how free each atom is: `pin` [atom] = 1 holds it
 -- still, as the middle of a dent). So a deep dent drags the metal around it in, rather than poking a spike.
 -- Then the folds. Returns how many atoms changed.
-function M.relax(h, pin, maxOffset, maxCrunch)
+function M.relax(h, pin, maxOffset, maxCrunch, dirx, diry, dirz)
   local L = h.limits
   local ax, ay, az, dx, dy, dz = h.ax, h.ay, h.az, h.dx, h.dy, h.dz
   local ea, eb, el = h.ea, h.eb, h.el
@@ -551,8 +561,14 @@ function M.relax(h, pin, maxOffset, maxCrunch)
         local sum = wa + wb
         if sum > 1e-9 then
           local k = (len - target) / len / sum
-          dx[a], dy[a], dz[a] = dx[a] + vx * k * wa, dy[a] + vy * k * wa, dz[a] + vz * k * wa
-          dx[b], dy[b], dz[b] = dx[b] - vx * k * wb, dy[b] - vy * k * wb, dz[b] - vz * k * wb
+          local cx, cy, cz = vx * k, vy * k, vz * k
+          if dirx then
+            -- only along the push: the metal around a dent is dragged the way it was hit, not sideways towards it
+            local along = cx * dirx + cy * diry + cz * dirz
+            cx, cy, cz = dirx * along, diry * along, dirz * along
+          end
+          dx[a], dy[a], dz[a] = dx[a] + cx * wa, dy[a] + cy * wa, dz[a] + cz * wa
+          dx[b], dy[b], dz[b] = dx[b] - cx * wb, dy[b] - cy * wb, dz[b] - cz * wb
           if wa > 0 then touched[a] = true end
           if wb > 0 then touched[b] = true end
           local off = math.abs(len - target) / rest

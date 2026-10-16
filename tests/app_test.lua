@@ -62,7 +62,8 @@ press('front')
 local n, d = moved(H.bodyMesh.vertices, orig, function(p) return p.z > 2.2 - 0.6 end)
 check(n > 0, 'front dent moves vertices: ' .. n)
 check(n ~= -1, 'only at the front')
-check(math.abs(d - math.min(H.storage.depth * H.storage.frontGive, H.storage.maxBodyIn)) < 0.02, ('as deep as asked (front give, half a foot at most): %.3f'):format(d))
+local asked = H.storage.depth * H.storage.frontGive
+check(d > asked * 0.8 and d < asked * 1.05, ('about as deep as asked, with the front give (no limit): %.3f of %.3f'):format(d, asked))
 local inward = true
 for i = 0, orig.n - 1 do
   local a, b = H.bodyMesh.vertices.raw[i].pos, orig.raw[i].pos
@@ -164,6 +165,43 @@ do
   check(quarter > door * 1.8, ('sideways: the rear quarter gives more than the door (%.3f vs %.3f m)'):format(quarter, door))
   press('Repair')
   H.storage.crunch, H.storage.springs = crunch0, springs0
+end
+
+-- no limit on depth: a hard hit on the nose (nothing behind it) goes in more than half a foot
+do
+  press('Repair')
+  local c0 = H.storage.crunch
+  H.storage.crunch = 0
+  local W = H.bodyWorld
+  H.state.dentWorld(body, W:transformPoint(vec3(0, 0.6, 2.2)), W:transformVector(vec3(0, 0, -1)), 0.5, 0.6)
+  H.settle()
+  local _, deep = moved(H.bodyMesh.vertices, orig)
+  check(deep > 0.3, ('no depth limit: the nose in %.2f m'):format(deep))
+  press('Repair')
+  -- the wheel wells: a deep hit on the side, at the front wheel (x 0.8, y 0.3, z 1.4: a cylinder 0.40 m round
+  -- and 0.225 m to each side of it), doesn't push the body into the wheel's space
+  local wheel = body.wheels[1]
+  check(wheel and math.abs(wheel[1] - 0.8) < 1e-6 and math.abs(wheel[3] - 1.4) < 1e-6, 'the front left wheel found')
+  local function worstIn()
+    local worst = -1
+    for i = 0, orig.n - 1 do
+      local o, p = orig.raw[i].pos, H.bodyMesh.vertices.raw[i].pos
+      local out = o.x >= 0.8 and 1 or -1  -- the side of the wheel it started on
+      local function depth(q)
+        local dyz = math.sqrt((q.y - 0.3) ^ 2 + (q.z - 1.4) ^ 2)
+        return math.min(wheel[5] - (q.x - 0.8) * out, wheel[4] - dyz)
+      end
+      worst = math.max(worst, depth(p) - math.max(0, depth(o)))
+    end
+    return worst
+  end
+  H.state.dentWorld(body, W:transformPoint(vec3(0.9, 0.3, 1.4)), W:transformVector(vec3(-1, 0, 0)), 0.4, 0.6)
+  H.settle()
+  local _, sideDeep = moved(H.bodyMesh.vertices, orig)
+  check(sideDeep > 0.1, ('the side dents: %.2f m'):format(sideDeep))
+  check(worstIn() < 1e-4, ('no further into the wheel than at rest: %.4f m'):format(worstIn()))
+  press('Repair')
+  H.storage.crunch = c0
 end
 
 -- left: the +x side

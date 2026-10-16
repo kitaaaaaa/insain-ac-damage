@@ -79,9 +79,15 @@ fading out around it. Then:
 - **Spring limits** (also from 1nsane): sheet metal hardly stretches, so when a dent would stretch the metal
   between two atoms too far, it drags the next atom in with it. Deep hits make wide dents, not spikes. And
   where metal is squashed together, it **folds**.
+- **One direction**: everything a hit moves, it moves the way the car was hit. The metal around a dent is
+  dragged along with it, not sideways towards it, and a harder hit goes deeper rather than wider. So a hard
+  hit on a corner crushes that corner in, instead of looking as if the corner was hit from every side.
 - **Crunch**: dented metal isn't smooth, it crumples. The app adds creases to dented areas (with Perlin noise,
-  a kind of natural-looking randomness), more the harder the hit and where the metal folded. The creases bend
-  the shading too, so they catch the light.
+  a kind of natural-looking randomness), more the harder the hit and where the metal folded. The creases push
+  the metal further in or less far, along the way it was hit, and bend the shading, so they catch the light.
+- **Parts standing off the body**, like a bull bar's tubes, keep their size as they're bent: each point stays
+  as far off its triangle of atoms as it was. (1nsane scaled that distance with the triangle's size, so tubes
+  swelled where the hull stretched.)
 
 Then every vertex pinned to a moved triangle moves with it, and the changed parts of the model go back to AC to
 be drawn.
@@ -93,8 +99,12 @@ be drawn.
 - **The roof** gives a little less than the ends.
 - **The interior** (the cockpit) bends with the body, half as much. **The driver, the steering wheel** and the
   gauge **needles** never move.
-- **How far**: any spot of the body moves at most about 15 cm, the interior about 7.5 cm. And the body never
-  goes through the interior: before it would, the metal crumples instead.
+- **How far**: the body goes in as far as it's pushed: there's no limit (there's a setting for one). The
+  interior moves at most about 7.5 cm, and the body never goes through it: before it would, the metal crumples
+  against it instead.
+- **The wheel wells stay clear of the wheels**: the app knows where each wheel is and how big its tyre is, and
+  keeps the bodywork out of the space each wheel needs (with room for the suspension to move, and at the
+  front, for the steering). A crushed wing folds around the wheel instead of into it.
 - **Moving parts** (wheels, tyres, brakes, suspension, wipers) are left alone.
 
 ### Finding crashes
@@ -129,7 +139,8 @@ Open them with the gear icon on the app's window. The useful ones:
 |---|---|
 | Crash dent scale | How deep crash dents are: lower for subtler damage, higher for more. |
 | Front / Rear / Doors / Quarters / Roof give | How easily each part of the car dents, compared with the others. |
-| Body moves at most, Interior moves at most | The deepest a dent can go (15 cm and 7.5 cm to begin with). |
+| Body moves at most, Interior moves at most | The deepest a dent can go: no limit for the body to begin with (the slider at its top), 7.5 cm for the interior. |
+| The body crumples against the interior, not through it | On: the body stops at the cockpit and crumples there. |
 | Crunch (in the main window), Crunch: biggest creases, Crunch: at most | How crumpled dented metal looks, how big the creases are, and how deep they can go. At 0% crunch, dents are smooth. |
 | Crunch style | **Creases** (sharp folds, like crumpled sheet metal) or **Hammered** (round bumps). |
 | Spring passes | How far a dent spreads into the panel around it. |

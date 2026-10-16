@@ -51,9 +51,9 @@ for v = 0, mesh.n - 1 do
     if t >= 0 then
       local a, bb, c = h.ta[t], h.tb[t], h.tc[t]
       local u, w, hh = b.bu[k], b.bv[k], b.bh[k]
-            local x = h.ax[a] + u * (h.ax[bb] - h.ax[a]) + w * (h.ax[c] - h.ax[a]) + hh * h.rcx[t]
-      local y = h.ay[a] + u * (h.ay[bb] - h.ay[a]) + w * (h.ay[c] - h.ay[a]) + hh * h.rcy[t]
-      local z = h.az[a] + u * (h.az[bb] - h.az[a]) + w * (h.az[c] - h.az[a]) + hh * h.rcz[t]
+            local x = h.ax[a] + u * (h.ax[bb] - h.ax[a]) + w * (h.ax[c] - h.ax[a]) + hh * h.rnx[t]
+      local y = h.ay[a] + u * (h.ay[bb] - h.ay[a]) + w * (h.ay[c] - h.ay[a]) + hh * h.rny[t]
+      local z = h.az[a] + u * (h.az[bb] - h.az[a]) + w * (h.az[c] - h.az[a]) + hh * h.rnz[t]
       worst = math.max(worst, math.abs(x - mesh.px[v]), math.abs(y - mesh.py[v]), math.abs(z - mesh.pz[v]))
       if j == 0 and (u < -1 or w < -1 or u + w > 2) then outside = outside + 1 end
     end
@@ -154,6 +154,58 @@ for n = 0, h.count - 1 do if h.cr[n] > 0.005 then folded = folded + 1 end end
 check(lo2 >= 0.5 - 0.01, ('squashed no further than 0.5x: %.3f'):format(lo2))
 check(folded > 0, 'squashed metal folds: ' .. folded .. ' atoms with crunch')
 hull.setLimits(h, nil)
+
+-- a hard hit dents one way: every atom it moves (springs and limits included) moves along the push, not
+-- sideways towards the dent
+do
+  hull.setLimits(h, 1.05, 0.5, 0.9, 1)
+  hull.reset(h)
+  local side = 7 * A
+  hull.dent(h, h.ax[side], h.ay[side], h.az[side], -1, 0, 0, 0.6, 0.5, 3, 2, 0.35, 0, 0.06)
+  local worst, n = 0, 0
+  for k = 0, h.count - 1 do
+    local l = math.sqrt(h.dx[k] ^ 2 + h.dy[k] ^ 2 + h.dz[k] ^ 2)
+    if l > 0.01 then
+      n = n + 1
+      worst = math.max(worst, math.deg(math.acos(math.min(1, -h.dx[k] / l))))
+    end
+  end
+  check(n > 5 and worst < 1, ('a hard hit moves %d atoms, all along the push (at most %.1f degrees off)'):format(n, worst))
+  hull.setLimits(h, nil)
+  hull.reset(h)
+end
+
+-- a part standing off the body (a tube, say) keeps its size: stretch a triangle 10% in its plane and a vertex
+-- pinned 5+ cm off it stays as far off it (1nsane's formula scaled that height with the triangle's area: +21%)
+do
+  hull.reset(h) hull.takeChanged(h)
+  local pick, t
+  for v = 0, mesh.n - 1 do
+    local k = v * hull.SLOTS
+    if b.bt[k] >= 0 and math.abs(b.bh[k]) > 0.05 and b.bw[k] > 0.999 then pick, t = v, b.bt[k] break end
+  end
+  check(pick ~= nil, 'a vertex off its triangle to try')
+  if pick then
+    local a1, b1, c1 = h.ta[t], h.tb[t], h.tc[t]
+    local cx = (h.ax[a1] + h.ax[b1] + h.ax[c1]) / 3
+    local cy = (h.ay[a1] + h.ay[b1] + h.ay[c1]) / 3
+    local cz = (h.az[a1] + h.az[b1] + h.az[c1]) / 3
+    local nx, ny, nz = h.rnx[t], h.rny[t], h.rnz[t]
+    for _, n in ipairs({a1, b1, c1}) do  -- 10% out from the middle, in the triangle's plane
+      local ox, oy, oz = h.ax[n] - cx, h.ay[n] - cy, h.az[n] - cz
+      local along = ox * nx + oy * ny + oz * nz
+      ox, oy, oz = ox - nx * along, oy - ny * along, oz - nz * along
+      h.dx[n], h.dy[n], h.dz[n], h.on[n] = ox * 0.1, oy * 0.1, oz * 0.1, 1
+    end
+    hull.begin(h)
+    local ox, oy, oz = sample(h, b, pick)
+    local px, py, pz = mesh.px[pick] + ox, mesh.py[pick] + oy, mesh.pz[pick] + oz
+    local before = (mesh.px[pick] - cx) * nx + (mesh.py[pick] - cy) * ny + (mesh.pz[pick] - cz) * nz
+    local after = (px - cx) * nx + (py - cy) * ny + (pz - cz) * nz
+    check(math.abs(after - before) < 1e-4, ('still %.3f m off its triangle (%.3f before)'):format(after, before))
+  end
+  hull.reset(h)
+end
 
 print(fails == 0 and 'hull tests passed' or ('hull tests: ' .. fails .. ' failed'))
 os.exit(fails == 0 and 0 or 1)
