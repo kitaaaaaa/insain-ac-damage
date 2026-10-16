@@ -29,18 +29,21 @@ The window shows the meshes and vertices read, the lattice, and how long setup a
 
 ## Tests in the window
 
-Changing a car's meshes directly crashed AC in the first test, so dents now go to **copies** of the car's body
-meshes: at a mesh's first dent, a copy is made under the same node with the same material, and the original
-is hidden (shown again on repair through Rebuild, or when the app closes). A setting switches back to changing
-the car's own meshes.
+Dents change the car's own meshes (`alterVertices`). The calls go out from the app's normal update, not from
+inside the background work, and the driver, steering wheel, cockpit and gauge needles are left alone (by AC's
+node names, and "needle" in a mesh's name). A setting makes dents go to copies of the meshes instead, but
+making a copy (`createMesh`) crashed AC in test C.
 
-To find out what works, the window has three tests. Run them one per AC launch, in order, since a crash ends
-AC (`softdamage_trace.txt` then shows the step):
+The window has tests for finding out what works. Run them one per AC launch, since a crash ends AC
+(`softdamage_trace.txt` then shows the step):
 
-- **A: track mesh**: sends a small track mesh back unchanged. Does the call work at all?
-- **B: car mesh**: sends the car's smallest body mesh back unchanged. Is it car meshes?
-- **C: car mesh copy**: makes a copy of that mesh, hides the original, and lifts the copy 5 cm (should be
-  visible). Does the copy way work? **Undo C** puts it back.
+- **A**: sends a small track mesh back unchanged.
+- **B**: sends the car's smallest body mesh back unchanged.
+- **C**: makes a copy of that mesh, hides the original, lifts the copy 5 cm. **Undo C** puts it back.
+- **D**: lifts that mesh 5 cm (changed vertices) and sends it.
+- **E**: the same as D, sent from inside a coroutine. **Undo D/E** puts it back.
+
+So far (a 1971 Dodge, CSP's scene API): A and B pass, C crashes in `createMesh`.
 
 ## How it works
 

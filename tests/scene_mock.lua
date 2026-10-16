@@ -99,6 +99,12 @@ return function(opts)
   H.doorMesh = {name = 'door', parent = door, vertices = buffer({{0, 0, 0, 1, 0, 0}, {0, 0.1, 0, 1, 0, 0}, {0.1, 0, 0, 1, 0, 0}})}
   body.meshes = {H.bodyMesh}
   door.meshes = {H.doorMesh}
+  -- not bodywork: the driver (by its node) and a gauge needle (by its name)
+  local driver = node('DRIVER:DRIVER', H.bodyWorld, body)
+  H.driverMesh = {name = 'DRIVER:suit', parent = driver, vertices = buffer({{0, 0.5, 0, 0, 1, 0}, {0.1, 0.5, 0, 0, 1, 0}, {0, 0.6, 0, 0, 1, 0}})}
+  driver.meshes = {H.driverMesh}
+  H.needleMesh = {name = 'car_needle_speed', parent = body, vertices = buffer({{0, 0.7, 1, 0, 1, 0}, {0.01, 0.7, 1, 0, 1, 0}, {0, 0.71, 1, 0, 1, 0}})}
+  body.meshes[#body.meshes + 1] = H.needleMesh
   local track = node('trackRoot:yes', H.rotY(0))
   H.trackMesh = {name = 'road', parent = track, vertices = buffer({{0, 0, 0, 0, 1, 0}, {1, 0, 0, 0, 1, 0}, {0, 0, 1, 0, 1, 0}})}
   track.meshes = {H.trackMesh}
@@ -126,6 +132,7 @@ return function(opts)
   function Ref:getVertices() local m = self.items[1] H.reads = H.reads + 1 return m and m.vertices:clone() end
   function Ref:alterVertices(v) local m = self.items[1] m.vertices = v:clone() H.altered[m.name] = (H.altered[m.name] or 0) + 1 return self end
   function Ref:getParent() return ref({self.items[1].parent}) end
+  function Ref:materialName() return 'mat_' .. self.items[1].name end
   function Ref:getWorldTransformationRaw() return self.items[1].world end
   function Ref:isPhysicsOnlyMesh() return false end
   function Ref:getIndices() local m = self.items[1] local b = {n = m.vertices.n} function b:size() return self.n end return b end

@@ -14,10 +14,11 @@ check(H.settle(), 'setup finishes')
 local f = io.open((os.getenv('TMPDIR') or '/tmp') .. '/softdamage_trace.txt')
 local traceText = f and f:read('*a') or ''
 if f then f:close() end
-check(traceText:find('app loaded', 1, true) and traceText:find('mesh 2/2: read', 1, true), 'trace written')
+check(traceText:find('app loaded', 1, true) and traceText:find('mesh 4/4: read', 1, true), 'trace written')
 local body = H.state.cars[0]
 check(body and body.state == 'ready', 'ready: ' .. tostring(body and body.state))
-check(body.vertices == orig.n + 3 and #body.meshes == 2, 'both meshes read: ' .. body.vertices)
+check(body.vertices == orig.n + 3 and #body.meshes == 2, 'both body meshes read: ' .. body.vertices)
+check(body.skipped == 2, 'driver and needle skipped: ' .. tostring(body.skipped))
 check(body.forward == 1 and body.left == 1, 'forward +z, left +x (from the wheels)')
 -- the panel's vertices in body space: through its rotated node
 local door
@@ -107,6 +108,7 @@ local altered = H.altered.body or 0
 press('front')
 local copy = H.created[#H.created]
 check(copy and copy.name == 'softdamage_body' and copy.parent == H.bodyMesh.parent and copy.material == 'body', 'copy made under the same node with the material')
+check(H.state.cars[0] and true, 'still running')
 check(H.bodyMesh.hidden and not copy.hidden, 'original hidden, copy shown')
 check((H.altered.body or 0) == altered and moved(H.bodyMesh.vertices, orig) == 0, 'the original mesh untouched')
 n = moved(copy.vertices, orig, function(p) return p.z > 2.2 - 0.6 end)
@@ -129,6 +131,13 @@ check(H.altered.road == 1 and H.altered.door and testCopy.name == 'softdamage_te
 check(math.abs(testCopy.vertices.raw[0].pos.y - H.doorMesh.vertices.raw[0].pos.y - 0.05) < 1e-5, 'test C: the copy lifted 5 cm')
 H.buttons['Undo C'] = true H.frame() H.buttons['Undo C'] = nil
 check(testCopy.disposed and not H.doorMesh.hidden, 'undo C')
+local doorAltered = H.altered.door
+H.buttons['D: change a car mesh'] = true H.frame() H.buttons['D: change a car mesh'] = nil
+check(H.altered.door == doorAltered + 1 and math.abs(H.doorMesh.vertices.raw[0].pos.y - origDoor.raw[0].pos.y - 0.05) < 1e-5, 'test D: lifted')
+H.buttons['E: same, in a coroutine'] = true H.frame() H.buttons['E: same, in a coroutine'] = nil
+check(H.altered.door == doorAltered + 2, 'test E: sent from a coroutine')
+H.buttons['Undo D/E'] = true H.frame() H.buttons['Undo D/E'] = nil
+check(moved(H.doorMesh.vertices, origDoor) == 0, 'undo D/E')
 
 -- rebuild: reads the undamaged model again
 H.buttons['Rebuild (re-read the car)'] = true H.frame() H.buttons['Rebuild (re-read the car)'] = nil
