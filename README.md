@@ -32,7 +32,7 @@ The window shows the meshes and vertices read, the lattice, and how long setup a
 Dents change the car's own meshes (`alterVertices`). The calls go out from the app's normal update, not from
 inside the background work, and the driver, steering wheel, cockpit and gauge needles are left alone (by AC's
 node names, and "needle" in a mesh's name). A setting makes dents go to copies of the meshes instead, but
-making a copy (`createMesh`) crashed AC in test C.
+test C crashed AC (at the `clone()` before `createMesh`, it turned out).
 
 The window has tests for finding out what works. Run them one per AC launch, since a crash ends AC
 (`softdamage_trace.txt` then shows the step):
@@ -43,7 +43,9 @@ The window has tests for finding out what works. Run them one per AC launch, sin
 - **D**: lifts that mesh 5 cm (changed vertices) and sends it.
 - **E**: the same as D, sent from inside a coroutine. **Undo D/E** puts it back.
 
-So far (a 1971 Dodge, CSP's scene API): A and B pass, C crashes in `createMesh`.
+So far (a 1971 Dodge): A and B pass; C and D crashed AC, and the dents did too. What they had in common was
+CSP's `VertexBuffer:clone()` (the traces stop right before it), so the app doesn't use it: a fresh copy of a
+mesh's vertices comes from `getVertices()` again.
 
 ## How it works
 

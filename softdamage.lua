@@ -173,6 +173,16 @@ end
 
 local sendQueue = {}  -- meshes with new vertices to send (outside of coroutines)
 
+-- A new copy of a mesh's vertices. Not VertexBuffer:clone(): in game that crashed AC (tests C and D died right
+-- at it); getVertices() makes its own copy and works.
+local function freshVertices(mesh, why)
+  trace('getVertices "%s" again (%s)', mesh.name, why)
+  local v = mesh.ref:getVertices()
+  trace('getVertices "%s": %s', mesh.name, v and (v:size() .. ' vertices') or 'nil')
+  if not v or v:size() ~= mesh.n then return nil end
+  return v
+end
+
 -- Shows a mesh's new vertices. 'direct': the car's own mesh takes them. 'copy': at its first dent, a copy of the
 -- mesh is made under the same node with the same material and the original hidden; the copy takes them.
 local function send(mesh)
@@ -189,7 +199,9 @@ local function send(mesh)
     local indices = mesh.ref:getIndices()
     trace('copy of "%s": %s indices; createMesh', mesh.name, indices and indices:size() or 'no')
     if not indices then return end
-    local copy = mesh.ref:getParent():createMesh('softdamage_' .. mesh.name, mesh.ref:materialName(), mesh.work:clone(), indices, false, false)
+    local start = freshVertices(mesh, 'for the copy')
+    if not start then return end
+    local copy = mesh.ref:getParent():createMesh('softdamage_' .. mesh.name, mesh.ref:materialName(), start, indices, false, false)
     trace('copy of "%s": %s; assignMaterialFrom', mesh.name, copy and 'made' or 'failed')
     if not copy then return end
     copy:assignMaterialFrom(mesh.ref)
@@ -197,7 +209,7 @@ local function send(mesh)
     mesh.ref:setVisible(false)
     mesh.copy = copy
     trace('copy of "%s": done', mesh.name)
-    return
+    -- the copy starts as the original: the dents go to it next
   end
   if not mesh.sent then trace('alterVertices on the copy of "%s", first time', mesh.name) end
   mesh.copy:alterVertices(mesh.work)
@@ -220,10 +232,14 @@ local function skin(body)
         if list then
           for e = 1, #list, 2 do
             local mesh, v = body.meshes[list[e]], list[e + 1]
-            if not mesh.work then mesh.work = mesh.orig:clone() end
-            local raw, orig = mesh.work.raw, mesh.orig.raw
+            if not mesh.work and not mesh.failed then
+              mesh.work = freshVertices(mesh, 'to dent')
+              mesh.failed = mesh.work == nil  -- left as it is
+            end
+            local raw, orig = mesh.work and mesh.work.raw, mesh.orig.raw
             local T = mesh.toMesh
-            local ox, oy, oz, ax, ay, az, bx, by, bz, cx, cy, cz = lattice.sample(l, mesh.px[v], mesh.py[v], mesh.pz[v])
+            local ox, oy, oz, ax, ay, az, bx, by, bz, cx, cy, cz
+            if raw then ox, oy, oz, ax, ay, az, bx, by, bz, cx, cy, cz = lattice.sample(l, mesh.px[v], mesh.py[v], mesh.pz[v]) end
             if ox then
               -- the offset into the mesh's own space
               raw[v].pos.x = orig[v].pos.x + T[1] * ox + T[4] * oy + T[7] * oz
@@ -235,7 +251,7 @@ local function skin(body)
               if len > 0 then raw[v].normal.x, raw[v].normal.y, raw[v].normal.z = mx / len, my / len, mz / len end
               mesh.moved[v] = true
               changed[mesh] = true
-            elseif mesh.moved[v] then
+            elseif raw and mesh.moved[v] then
               raw[v].pos.x, raw[v].pos.y, raw[v].pos.z = orig[v].pos.x, orig[v].pos.y, orig[v].pos.z
               raw[v].normal.x, raw[v].normal.y, raw[v].normal.z = orig[v].normal.x, orig[v].normal.y, orig[v].normal.z
               mesh.moved[v] = nil
@@ -269,7 +285,7 @@ local function restoreNow(body)
     elseif mesh.sent then
       mesh.ref:alterVertices(mesh.orig)
     end
-    mesh.sent, mesh.work, mesh.moved = nil, nil, {}
+    mesh.sent, mesh.work, mesh.moved, mesh.failed = nil, nil, {}, nil
   end
 end
 -- unloading (AC closing, the app reloaded): the originals back
@@ -435,9 +451,11 @@ local function testC(body)
   local indices = mesh.ref:getIndices()
   trace('test C: %s indices; createMesh', indices and indices:size() or 'no')
   if not indices then return 'no indices' end
-  local v = mesh.orig:clone()
+  local v = freshVertices(mesh, 'test C')
+  local start = freshVertices(mesh, 'test C, for the copy')
+  if not v or not start then return 'getVertices failed' end
   trace('test C: material "%s"', mesh.ref:materialName())
-  local copy = mesh.ref:getParent():createMesh('softdamage_test', mesh.ref:materialName(), v:clone(), indices, false, false)
+  local copy = mesh.ref:getParent():createMesh('softdamage_test', mesh.ref:materialName(), start, indices, false, false)
   trace('test C: %s', copy and 'made' or 'createMesh failed')
   if not copy then return 'createMesh failed' end
   copy:assignMaterialFrom(mesh.ref)
@@ -456,7 +474,8 @@ local function testC(body)
 end
 -- D: the smallest mesh lifted 5 cm (changed vertices), sent from here; E: the same, sent from inside a coroutine
 local function lifted(mesh, dy)
-  local v = mesh.orig:clone()
+  local v = freshVertices(mesh, 'test D/E')
+  if not v then return nil end
   local T = mesh.toMesh
   for i = 0, v:size() - 1 do
     v.raw[i].pos.x, v.raw[i].pos.y, v.raw[i].pos.z = v.raw[i].pos.x + T[4] * dy, v.raw[i].pos.y + T[5] * dy, v.raw[i].pos.z + T[6] * dy
@@ -467,6 +486,7 @@ local testLifted
 local function testD(body)
   local mesh = smallestMesh(body)
   local v = lifted(mesh, 0.05)
+  if not v then return 'getVertices failed' end
   trace('test D: alterVertices on "%s" (%d vertices), lifted 5 cm', mesh.name, mesh.n)
   mesh.ref:alterVertices(v)
   trace('test D: done')
@@ -476,6 +496,7 @@ end
 local function testE(body)
   local mesh = smallestMesh(body)
   local v = lifted(mesh, 0.05)
+  if not v then return 'getVertices failed' end
   local co = coroutine.create(function()
     trace('test E: alterVertices on "%s" (%d vertices), lifted 5 cm, inside a coroutine', mesh.name, mesh.n)
     mesh.ref:alterVertices(v)

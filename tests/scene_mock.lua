@@ -66,10 +66,15 @@ return function(opts)
       r.pos.x, r.pos.y, r.pos.z, r.normal.x, r.normal.y, r.normal.z = v[1], v[2], v[3], v[4], v[5], v[6]
     end
     function b:size() return self.n end
-    function b:clone()
+    function b:copy()  -- the mock's own copies (what getVertices does natively)
       local c = buffer({}, self.n)
       ffi.copy(c.raw, self.raw, ffi.sizeof('mock_vertex') * self.n)
       return c
+    end
+    -- in game, VertexBuffer:clone() crashed AC: the app must not use it
+    function b:clone()
+      if H.noClone then error('VertexBuffer:clone() called by the app (it crashed AC in game)', 2) end
+      return self:copy()
     end
     return b
   end
@@ -129,8 +134,8 @@ return function(opts)
     table.sort(out, function(a, b) return a.name < b.name end)
     return ref(out)
   end
-  function Ref:getVertices() local m = self.items[1] H.reads = H.reads + 1 return m and m.vertices:clone() end
-  function Ref:alterVertices(v) local m = self.items[1] m.vertices = v:clone() H.altered[m.name] = (H.altered[m.name] or 0) + 1 return self end
+  function Ref:getVertices() local m = self.items[1] H.reads = H.reads + 1 return m and m.vertices:copy() end
+  function Ref:alterVertices(v) local m = self.items[1] m.vertices = v:copy() H.altered[m.name] = (H.altered[m.name] or 0) + 1 return self end
   function Ref:getParent() return ref({self.items[1].parent}) end
   function Ref:materialName() return 'mat_' .. self.items[1].name end
   function Ref:getWorldTransformationRaw() return self.items[1].world end
@@ -139,7 +144,7 @@ return function(opts)
   function Ref:createMesh(name, material, vertices, indices, keepAlive, moveData)
     local parent = self.items[1]
     assert(vertices.n > 0 and indices:size() > 0, 'createMesh args')
-    local m = {name = name, parent = parent, vertices = vertices:clone(), created = true, visible = true}
+    local m = {name = name, parent = parent, vertices = vertices:copy(), created = true, visible = true}
     parent.meshes[#parent.meshes + 1] = m
     H.created[#H.created + 1] = m
     return ref({m})
@@ -217,6 +222,7 @@ return function(opts)
   function H.load()
     __dirname = opts.dir or os.getenv('TMPDIR') or '/tmp'
     __softdamageTest = {}
+    H.noClone = true
     dofile('softdamage.lua')
     H.state = __softdamageTest
   end
