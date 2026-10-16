@@ -19,10 +19,15 @@ if AC crashes, the file's last line shows where.
 ## Trying it
 
 - **Crashes** dent every car that's been read, where it was hit and the way it was pushed, deeper and
-  crunchier the harder the hit. An impact is a jump in the car's velocity over 3 g in a frame (braking and
-  cornering stay under about 2 g), or AC reporting a contact; the hit is the biggest change of velocity over
-  the next 150 ms, and it dents from 2.5 m/s. A teleport (over 5 m in a frame) isn't one. Each crash is in the
-  trace file with its speed and depth.
+  crunchier the harder the hit. Where: an impulse J at r from the car's middle changes its velocity by J/m and
+  its spin by I^-1 (r x J), so from the two changes the hit is found, r = k^2 (dv x dw) / |dv|^2 (k from the
+  body's size; the spin from how the car's axes turn between frames). So a tail swinging into a wall dents the
+  tail, a quarter panel the quarter, the middle of the side the doors. How hard: the change at the contact
+  point, dv + dw x r (a tail strike mostly spins the car: the middle barely changes). An impact starts with a
+  jump over 3 g (braking and cornering stay under about 2 g) at the middle or, through the spin, at the ends,
+  or AC reporting a contact; the biggest change over the next 150 ms is the hit, and it dents from 2.5 m/s at
+  the contact. A push from below (a landing) counts 15%: the suspension takes it. A teleport (over 5 m in a
+  frame) isn't a crash. Each crash is in the trace file: its speed, where, and the depth.
 - **Buttons** dent the front, back, left, right or roof; **Repair** undoes it all. Depth, radius and crunch
   are sliders.
 - **Ctrl + left click** on the car dents it there, along the view.

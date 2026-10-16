@@ -455,51 +455,110 @@ local function dentSide(body, side)
 end
 
 -- ---------------------------------------------------------------------------------------------
--- Crashes. An impact shows as a jump in the car's velocity: over 30 m/s2 (3 g; braking and cornering stay under
--- about 2 g) in a frame, or AC reporting a contact (collisionDepth; AC's physics runs faster than the app's
--- frames, so a contact can come and go between two of them: the velocity catches it either way). From there,
--- the biggest change from the velocity just before it over 150 ms (an AC crash takes a few frames) is the hit:
--- over 2.5 m/s it dents, where the car was hit (a ray from that side towards its middle), pushed the way the car
--- was pushed, deeper and crunchier the harder. A teleport (over 5 m in a frame) isn't a crash.
-local IMPACT_ACCEL, IMPACT_WINDOW, MIN_HIT, COOLDOWN = 30, 0.15, 2.5, 0.3
+-- Crashes. An impulse J at r from the car's middle changes its velocity by J/m and its spin by I^-1 (r x J), so
+-- from the two changes (dv, dw) the hit is found: r = k^2 (dv x dw) / |dv|^2 (k: the body's radius of gyration,
+-- from its size). The spin comes from how the car's own axes turn between frames, with the same cross product,
+-- so the signs agree whatever the world's handedness. A hit at the tail mostly spins the car: what counts is the
+-- change at the contact point, dv + dw x r.
+-- An impact starts with a jump over 3 g (braking and cornering stay under about 2 g) at the middle or, through
+-- the spin, at the ends, or AC reporting a contact (contacts can come and go between frames); the biggest change
+-- over the next 150 ms is the hit, and from 2.5 m/s at the contact point it dents there. A push from below (a
+-- landing) counts 15%: the suspension takes it. A teleport (over 5 m in a frame) isn't a crash.
+local IMPACT_ACCEL, IMPACT_WINDOW, MIN_HIT, COOLDOWN, FROM_BELOW = 30, 0.15, 2.5, 0.3, 0.15
 local crash = {}
+local function cross(ax, ay, az, bx, by, bz) return ay * bz - az * by, az * bx - ax * bz, ax * by - ay * bx end
+
+-- The car's spin over the last frame (rad/s, world), from its axes then and now: for a small turn by angle t
+-- about axis a, the sum of e x e' over three orthonormal axes is 2 t a.
+local function spin(c, car, dt)
+  local l0, u0, l1, u1 = c.prevLook, c.prevUp, car.look, car.up
+  local s0x, s0y, s0z = cross(l0.x, l0.y, l0.z, u0.x, u0.y, u0.z)
+  local s1x, s1y, s1z = cross(l1.x, l1.y, l1.z, u1.x, u1.y, u1.z)
+  local ax, ay, az = cross(l0.x, l0.y, l0.z, l1.x, l1.y, l1.z)
+  local bx, by, bz = cross(u0.x, u0.y, u0.z, u1.x, u1.y, u1.z)
+  local cx, cy, cz = cross(s0x, s0y, s0z, s1x, s1y, s1z)
+  local k = 0.5 / dt
+  return (ax + bx + cx) * k, (ay + by + cy) * k, (az + bz + cz) * k
+end
+
 local function updateCrash(i, dt)
   local car = ac.getCar(i)
   local body = cars[i]
   if not car or not body or body.state ~= 'ready' or dt <= 0 then return end
   local c = crash[i]
-  if not c then c = {prevVel = vec3():set(car.velocity), prevPos = vec3():set(car.position), cool = 0} crash[i] = c return end
+  if not c then
+    c = {prevVel = vec3():set(car.velocity), prevPos = vec3():set(car.position), prevLook = vec3():set(car.look),
+      prevUp = vec3():set(car.up), w = {0, 0, 0}, cool = 0}
+    crash[i] = c
+    return
+  end
+  local mn, mx = body.min, body.max
+  local halfLen = math.max(mx[3] - mn[3], mx[1] - mn[1]) / 2
   c.cool = math.max(0, c.cool - dt)
   local teleported = car.position:distanceSquared(c.prevPos) > 25
-  if teleported then c.at = nil end
+  local wx, wy, wz = spin(c, car, dt)
+  if teleported then c.at = nil wx, wy, wz = c.w[1], c.w[2], c.w[3] end
   local jump = (car.velocity - c.prevVel):length() / dt
-  if not c.at and not teleported and c.cool == 0 and (jump > IMPACT_ACCEL or car.collisionDepth > 0) then
+  local spinJump = math.sqrt((wx - c.w[1]) ^ 2 + (wy - c.w[2]) ^ 2 + (wz - c.w[3]) ^ 2) / dt * halfLen
+  if not c.at and not teleported and c.cool == 0 and (jump + spinJump > IMPACT_ACCEL or car.collisionDepth > 0) then
     c.at, c.before, c.maxDv = 0, c.prevVel:clone(), vec3()
+    c.wBefore = {c.w[1], c.w[2], c.w[3]}
   end
   if c.at then
     c.at = c.at + dt
     local dv = car.velocity - c.before
     if dv:lengthSquared() > c.maxDv:lengthSquared() then c.maxDv:set(dv) end
     if c.at >= IMPACT_WINDOW then
-      local speed = c.maxDv:length()
       c.at = nil
-      if speed > MIN_HIT then
+      local up = car.up
+      local dvx, dvy, dvz = c.maxDv.x, c.maxDv.y, c.maxDv.z
+      -- a push from below (along the car's up): mostly the suspension's
+      local vu = dvx * up.x + dvy * up.y + dvz * up.z
+      if vu > 0 then
+        local cut = vu * (1 - FROM_BELOW)
+        dvx, dvy, dvz = dvx - up.x * cut, dvy - up.y * cut, dvz - up.z * cut
+      end
+      local dv2 = dvx * dvx + dvy * dvy + dvz * dvz
+      local dwx, dwy, dwz = wx - c.wBefore[1], wy - c.wBefore[2], wz - c.wBefore[3]
+      -- where: r = k^2 (dv x dw) / |dv|^2, kept inside the body's box (in the body's own frame)
+      local W = body.node:getWorldTransformationRaw()
+      local inv = W:inverse()
+      local L, Wd, Hd = mx[3] - mn[3], mx[1] - mn[1], mx[2] - mn[2]
+      local k2 = (L * L + Wd * Wd) / 12
+      local rx, ry, rz = 0, 0, 0
+      if dv2 > 1e-6 then
+        rx, ry, rz = cross(dvx, dvy, dvz, dwx, dwy, dwz)
+        rx, ry, rz = rx * k2 / dv2, ry * k2 / dv2, rz * k2 / dv2
+      end
+      local rl = inv:transformVector(vec3(rx, ry, rz))
+      rl.x = math.max(-Wd / 2, math.min(Wd / 2, rl.x))
+      rl.y = math.max(-Hd / 2, math.min(Hd / 2, rl.y))
+      rl.z = math.max(-L / 2, math.min(L / 2, rl.z))
+      local r = W:transformVector(rl)
+      -- the change at the contact point: dv + dw x r (at most three times the middle's: noise in the spin)
+      local px, py, pz = cross(dwx, dwy, dwz, r.x, r.y, r.z)
+      local dvLen = math.sqrt(dv2)
+      local speed = math.min(dvLen * 3 + 1, math.sqrt((dvx + px) ^ 2 + (dvy + py) ^ 2 + (dvz + pz) ^ 2))
+      if speed > MIN_HIT and dvLen > 1e-3 then
         c.cool = COOLDOWN
-        local dir = c.maxDv:clone():normalize()
-        -- aimed at the middle of the body's box (in the body's own frame, so it's where the meshes are)
-        local mn, mx = body.min, body.max
-        local mid = body.node:getWorldTransformationRaw():transformPoint(vec3((mn[1] + mx[1]) / 2, (mn[2] + mx[2]) / 2, (mn[3] + mx[3]) / 2))
-        local hit = hitCar(body, mid - dir * 6, dir) or (mid - dir * 1.5)
+        local dir = vec3(dvx, dvy, dvz):normalize()
+        local centre = W:transformPoint(vec3((mn[1] + mx[1]) / 2, (mn[2] + mx[2]) / 2, (mn[3] + mx[3]) / 2))
+        local aim = centre + r
+        local hit = hitCar(body, aim - dir * 6, dir) or (aim - dir * 1.0)
         local depth = math.min(settings.maxOffset, (speed - MIN_HIT) * 0.025 * settings.crashScale + 0.01)
-        trace('crash: car %d, %.1f m/s: dent %.3f m', i, speed, depth)
+        trace('crash: car %d, %.1f m/s at the contact (%.1f at the middle), %.2f m from the middle (along %.2f): dent %.3f m',
+          i, speed, dvLen, math.sqrt(rl.x ^ 2 + rl.y ^ 2 + rl.z ^ 2), rl.z, depth)
         dentWorld(body, hit, dir, depth, 0.35 + 0.025 * speed, speed / 12)
         body.lastCrash = speed
         body.crashes = (body.crashes or 0) + 1
       end
     end
   end
+  c.w[1], c.w[2], c.w[3] = wx, wy, wz
   c.prevVel:set(car.velocity)
   c.prevPos:set(car.position)
+  c.prevLook:set(car.look)
+  c.prevUp:set(car.up)
 end
 
 -- Repairs: going to the pits or being reset (ac.onCarJumped) mends the body.
@@ -534,6 +593,9 @@ function script.update(dt)
   -- every car that's been read
   if settings.crashDents and not sim.isPaused and not sim.isReplayActive then
     for ci in pairs(cars) do updateCrash(ci, dt) end
+  else
+    -- not watching: forget the last frame, so the next one isn't compared with a stale one (a false crash)
+    for ci in pairs(crash) do crash[ci] = nil end
   end
   runJobs()
   sendQueued()

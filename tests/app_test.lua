@@ -223,6 +223,73 @@ local function hitAt(speed)
   end
   return maxOff, maxCr
 end
+-- where a hit lands, from how the car's spin changes: a small rigid-body model. An impulse at r (from the body's
+-- middle) changes the velocity by dv and the spin by (r x dv) / k^2; the car's axes then turn with the spin
+local W = H.bodyWorld
+local k2 = (4.5 ^ 2 + 1.9 ^ 2) / 12
+local function crossv(a, b) return vec3(a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x) end
+local function rotate(v, w, dt)
+  local wl = w:length()
+  if wl < 1e-9 then return v end
+  local a, t = vec3(w.x / wl, w.y / wl, w.z / wl), wl * dt
+  local c, s = math.cos(t), math.sin(t)
+  return v * c + crossv(a, v) * s + a * (a:dot(v) * (1 - c))
+end
+local function strike(rLocal, dvLocal, frames)
+  local r, dv = W:transformVector(rLocal), W:transformVector(dvLocal)
+  local w = crossv(r, dv) * (1 / k2)
+  H.car.velocity:set(H.car.velocity + dv) current = nil
+  for _ = 1, frames or 30 do
+    H.car.look:set(rotate(H.car.look, w, 1 / 60))
+    H.car.up:set(rotate(H.car.up, w, 1 / 60))
+    H.frame()
+  end
+  H.settle()
+end
+-- the dent's middle (weighted by how far each vertex moved), in the body's frame
+local function dentMiddle()
+  local sx, sz, sw = 0, 0, 0
+  for i = 0, orig.n - 1 do
+    local a, b = H.bodyMesh.vertices.raw[i].pos, orig.raw[i].pos
+    local d = math.sqrt((a.x - b.x) ^ 2 + (a.y - b.y) ^ 2 + (a.z - b.z) ^ 2)
+    sx, sz, sw = sx + b.x * d, sz + b.z * d, sw + d
+  end
+  return sw > 0 and sx / sw or nil, sw > 0 and sz / sw or nil
+end
+local function reset()
+  -- crash dents off while the car is put back (a speed dropped to 0 in a frame would be a crash)
+  H.storage.crashDents = false
+  H.car.velocity:set(0, 0, 0) H.car.look:set(W:transformVector(vec3(0, 0, 1))) H.car.up:set(W:transformVector(vec3(0, 1, 0)))
+  current = 0
+  for _ = 1, 5 do H.frame() end
+  H.storage.crashDents = true
+  for _ = 1, 30 do H.frame() end
+  press('Repair')
+end
+H.storage.crunch = 1
+-- drifting, the tail hits a wall on the right (-x): pushed left (+x) at the rear right corner
+reset()
+local n0 = crashes()
+strike(vec3(-0.85, 0, -2.0), vec3(3, 0, 0))
+local mx_, mz_ = dentMiddle()
+check(crashes() == n0 + 1 and mz_ and mz_ < -1.2 and mx_ < 0, ('tail into a wall: dented at the rear right (x %.2f, z %.2f)'):format(mx_ or 0, mz_ or 0))
+-- the front left quarter: pushed right (-x) near the front
+reset()
+strike(vec3(0.85, 0, 1.8), vec3(-3, 0, 0))
+mx_, mz_ = dentMiddle()
+check(mz_ and mz_ > 1.0 and mx_ > 0, ('front quarter: dented at the front left (x %.2f, z %.2f)'):format(mx_ or 0, mz_ or 0))
+-- the middle of the side: the doors
+reset()
+strike(vec3(0.85, 0, 0), vec3(-5, 0, 0))
+mx_, mz_ = dentMiddle()
+check(mz_ and math.abs(mz_) < 0.6 and mx_ > 0, ('middle of the side: the doors (x %.2f, z %.2f)'):format(mx_ or 0, mz_ or 0))
+-- a jump landing: pushed up 6 m/s from below: no dent
+reset()
+n0 = crashes()
+strike(vec3(0, -0.6, 0), vec3(0, 6, 0))
+check(crashes() == n0, 'a landing: no dent')
+reset()
+
 local o1, c1 = hitAt(5)
 local o2, c2 = hitAt(12)
 check(o2 > o1 * 1.5 and c2 > c1 * 1.5 and c2 <= H.storage.maxCrunch + 1e-9, ('harder hit (crunch capped at maxCrunch): deeper (%.3f vs %.3f) and crunchier (%.4f vs %.4f)'):format(o2, o1, c2, c1))
