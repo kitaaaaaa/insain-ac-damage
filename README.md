@@ -10,20 +10,33 @@ This first version is for finding out what works in the game, so it has test den
 ## Install
 
 Copy the `softdamage` folder to `assettocorsa\apps\lua\`, or drag the .zip file over Content Manager. In a
-session, open "Soft Body Damage" from the app bar and press **Read this car**: it reads the body of the car
-you're watching, a mesh per frame. (A setting reads each car you watch without the button.)
+session, open "Soft Body Damage" from the app bar: it reads the body of the car you're watching, a mesh per
+frame (a setting turns that off, for a **Read this car** button instead).
 
 Each step that calls into CSP is written to `softdamage_trace.txt` in the app's folder, a line at a time, so
 if AC crashes, the file's last line shows where.
 
 ## Trying it
 
-- **Buttons** dent the front, back, left, right or roof; **Repair** undoes it all. Depth and radius are
-  sliders.
+- **Crashes** dent every car that's been read, where it was hit and the way it was pushed, deeper and
+  crunchier the harder the hit. An impact is a jump in the car's velocity over 3 g in a frame (braking and
+  cornering stay under about 2 g), or AC reporting a contact; the hit is the biggest change of velocity over
+  the next 150 ms, and it dents from 2.5 m/s. A teleport (over 5 m in a frame) isn't one. Each crash is in the
+  trace file with its speed and depth.
+- **Buttons** dent the front, back, left, right or roof; **Repair** undoes it all. Depth, radius and crunch
+  are sliders.
 - **Ctrl + left click** on the car dents it there, along the view.
-- **Dents from crashes** (settings, experimental): from the car's change of speed in a crash, where it was hit;
-  1.5 m/s and up.
 - Going back to the pits, or being reset, repairs the car.
+
+## Crunch
+
+Dented metal is crumpled with 3D Perlin noise: each dented vertex moves in and out along its surface's normal
+by the noise times the crunch there, and its normal tilts with the noise's slope, so the creases catch the
+light. The crunch is a second value on each atom, added by each dent with the same falloff and springs, and it
+grows faster than the dent with how hard the hit was (a test dent: its depth; a crash: its speed), so a tap
+leaves a smooth dent and a big hit crumples the metal. **Creases** (ridged noise: sharp folds) is the default
+style, **Hammered** (bumps) the other; the biggest creases are about 0.25 m, with finer ones on top, and the
+crunch moves the metal at most 6 cm (settings). Each car gets its own noise, so no two crumple alike.
 
 The window shows the meshes and vertices read, the lattice, and how long setup and each re-skin took.
 
@@ -43,7 +56,7 @@ The window has tests for finding out what works. Run them one per AC launch, sin
 - **D**: lifts that mesh 5 cm (changed vertices) and sends it.
 - **E**: the same as D, sent from inside a coroutine. **Undo D/E** puts it back.
 
-So far (a 1971 Dodge): A and B pass; C and D crashed AC, and the dents did too. What they had in common was
+So far (a 1971 Dodge): A and B pass; C and D crashed AC, and the dents did too (fixed in 0.1.4). What they had in common was
 CSP's `VertexBuffer:clone()` (the traces stop right before it), so the app doesn't use it: a fresh copy of a
 mesh's vertices comes from `getVertices()` again.
 
@@ -76,6 +89,7 @@ From this folder, with LuaJIT:
 
 ```
 luajit tests/lattice_test.lua
+luajit tests/noise_test.lua
 luajit tests/app_test.lua
 ```
 

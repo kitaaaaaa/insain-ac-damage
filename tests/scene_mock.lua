@@ -14,6 +14,7 @@ return function(opts)
   function V:dot(o) return self.x * o.x + self.y * o.y + self.z * o.z end
   function V:lengthSquared() return self:dot(self) end
   function V:length() return math.sqrt(self:dot(self)) end
+  function V:distanceSquared(o) return (self.x - o.x) ^ 2 + (self.y - o.y) ^ 2 + (self.z - o.z) ^ 2 end
   function V:normalize() local l = self:length() if l > 0 then self.x, self.y, self.z = self.x / l, self.y / l, self.z / l end return self end
   V.__add = function(a, b) return vec3(a.x + b.x, a.y + b.y, a.z + b.z) end
   V.__sub = function(a, b) return vec3(a.x - b.x, a.y - b.y, a.z - b.z) end
@@ -215,6 +216,7 @@ return function(opts)
     text = function() end, textColored = function() end, textWrapped = function() end, separator = function() end,
     sameLine = function() end, button = function(label) return H.buttons[label] == true end,
     slider = function(_, v) return v end, checkbox = function() return false end,
+    combo = function(_, selected) return selected end, ComboFlags = {None = 0},
   }
   os.preciseClock = os.clock
   script = {}

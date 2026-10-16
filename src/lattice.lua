@@ -17,6 +17,7 @@ function M.new(min, max, spacing)
   end
   l.count = l.n[1] * l.n[2] * l.n[3]
   l.dx, l.dy, l.dz = {}, {}, {}
+  l.cr = {}  -- crunch: how rough the metal is around each atom (metres of noise), from how hard it was hit
   l.on = {}  -- 1 where an atom has moved, else 0 (one sum tells if a cell has anything to do)
   M.reset(l)
   l.changed = {}  -- a new lattice has nothing to redo
@@ -28,8 +29,8 @@ end
 function M.reset(l)
   l.changed = l.changed or {}
   for i = 0, l.count - 1 do
-    if l.dx[i] ~= 0 or l.dy[i] ~= 0 or l.dz[i] ~= 0 then l.changed[i] = true end
-    l.dx[i], l.dy[i], l.dz[i], l.on[i] = 0, 0, 0, 0
+    if l.dx[i] ~= 0 or l.dy[i] ~= 0 or l.dz[i] ~= 0 or (l.cr[i] or 0) ~= 0 then l.changed[i] = true end
+    l.dx[i], l.dy[i], l.dz[i], l.cr[i], l.on[i] = 0, 0, 0, 0, 0
   end
   l.dirty = true
 end
@@ -72,9 +73,10 @@ end
 -- A dent: nodes within `radius` of point p move along dir (unit, into the body) by up to `depth` metres, with
 -- a smooth falloff ((1 - (d/r)^2)^2). With `springs` passes, the dent then spreads to the atoms around it (each
 -- moves `stiffness` of the way to its neighbours' average) -- only this dent: earlier ones stay as they are.
--- Offsets add up (the metal stays bent), each atom's to at most maxOffset. Returns how many atoms moved.
-function M.dent(l, px, py, pz, dirx, diry, dirz, depth, radius, maxOffset, springs, stiffness)
-  springs, stiffness = springs or 0, stiffness or 0.35
+-- Offsets add up (the metal stays bent), each atom's to at most maxOffset. `crunch` (metres) roughens the metal
+-- with the same falloff and springs, adding up to at most maxCrunch. Returns how many atoms moved.
+function M.dent(l, px, py, pz, dirx, diry, dirz, depth, radius, maxOffset, springs, stiffness, crunch, maxCrunch)
+  springs, stiffness, crunch = springs or 0, stiffness or 0.35, crunch or 0
   local nx, ny, nz = l.n[1], l.n[2], l.n[3]
   -- the region it can reach: the radius, plus a node per spring pass
   local i0 = math.max(0, math.floor((px - radius - l.min[1]) / l.step[1]) - springs)
@@ -83,39 +85,44 @@ function M.dent(l, px, py, pz, dirx, diry, dirz, depth, radius, maxOffset, sprin
   local j1 = math.min(ny - 1, math.ceil((py + radius - l.min[2]) / l.step[2]) + springs)
   local k0 = math.max(0, math.floor((pz - radius - l.min[3]) / l.step[3]) - springs)
   local k1 = math.min(nz - 1, math.ceil((pz + radius - l.min[3]) / l.step[3]) + springs)
-  -- the push (a scalar along dir), on the region's nodes
-  local w = {}
+  -- the push (a scalar along dir) and the crunch, on the region's nodes
+  local w, cw = {}, {}
   local r2 = radius * radius
   for k = k0, k1 do for j = j0, j1 do for i = i0, i1 do
     local x, y, z = M.nodePos(l, i, j, k)
     local d2 = (x - px) ^ 2 + (y - py) ^ 2 + (z - pz) ^ 2
     local f = d2 < r2 and 1 - d2 / r2 or 0
     w[idx(l, i, j, k)] = depth * f * f
+    cw[idx(l, i, j, k)] = crunch * f * f
   end end end
   -- springs: spread it (atoms outside the region count as not pushed)
   for _ = 1, springs do
-    local out = {}
+    local out, cout = {}, {}
     for k = k0, k1 do for j = j0, j1 do for i = i0, i1 do
       local n = idx(l, i, j, k)
-      local s, c = 0, 0
-      if i > 0 then s, c = s + (w[n - 1] or 0), c + 1 end
-      if i < nx - 1 then s, c = s + (w[n + 1] or 0), c + 1 end
-      if j > 0 then s, c = s + (w[n - nx] or 0), c + 1 end
-      if j < ny - 1 then s, c = s + (w[n + nx] or 0), c + 1 end
-      if k > 0 then s, c = s + (w[n - nx * ny] or 0), c + 1 end
-      if k < nz - 1 then s, c = s + (w[n + nx * ny] or 0), c + 1 end
+      local s, t, c = 0, 0, 0
+      if i > 0 then s, t, c = s + (w[n - 1] or 0), t + (cw[n - 1] or 0), c + 1 end
+      if i < nx - 1 then s, t, c = s + (w[n + 1] or 0), t + (cw[n + 1] or 0), c + 1 end
+      if j > 0 then s, t, c = s + (w[n - nx] or 0), t + (cw[n - nx] or 0), c + 1 end
+      if j < ny - 1 then s, t, c = s + (w[n + nx] or 0), t + (cw[n + nx] or 0), c + 1 end
+      if k > 0 then s, t, c = s + (w[n - nx * ny] or 0), t + (cw[n - nx * ny] or 0), c + 1 end
+      if k < nz - 1 then s, t, c = s + (w[n + nx * ny] or 0), t + (cw[n + nx * ny] or 0), c + 1 end
       out[n] = w[n] + stiffness * (s / c - w[n])
+      cout[n] = cw[n] + stiffness * (t / c - cw[n])
     end end end
-    w = out
+    w, cw = out, cout
   end
   local moved = 0
   for n, a in pairs(w) do
-    if a > 1e-6 then
+    local ca = cw[n] or 0
+    if a > 1e-6 or ca > 1e-6 then
       local ox, oy, oz = l.dx[n] + dirx * a, l.dy[n] + diry * a, l.dz[n] + dirz * a
       local len = math.sqrt(ox * ox + oy * oy + oz * oz)
       if maxOffset and len > maxOffset then local s = maxOffset / len ox, oy, oz = ox * s, oy * s, oz * s end
-      if ox ~= l.dx[n] or oy ~= l.dy[n] or oz ~= l.dz[n] then
-        l.dx[n], l.dy[n], l.dz[n], l.on[n] = ox, oy, oz, 1
+      local cr = l.cr[n] + ca
+      if maxCrunch and cr > maxCrunch then cr = maxCrunch end
+      if ox ~= l.dx[n] or oy ~= l.dy[n] or oz ~= l.dz[n] or cr ~= l.cr[n] then
+        l.dx[n], l.dy[n], l.dz[n], l.cr[n], l.on[n] = ox, oy, oz, cr, 1
         l.changed[n] = true
         moved = moved + 1
       end
@@ -125,7 +132,8 @@ function M.dent(l, px, py, pz, dirx, diry, dirz, depth, radius, maxOffset, sprin
   return moved
 end
 
--- The offset at a point and its derivatives: returns ox, oy, oz and the 9 partials (d(ox,oy,oz)/dx, /dy, /dz),
+-- The offset at a point and its derivatives: returns ox, oy, oz, the 9 partials (d(ox,oy,oz)/dx, /dy, /dz) and
+-- the crunch there,
 -- or nil when the cell around the point has no offset at all (the common case: the vertex stays put).
 function M.sample(l, x, y, z)
   local nx, ny, nz = l.n[1], l.n[2], l.n[3]
@@ -166,7 +174,10 @@ function M.sample(l, x, y, z)
   local ozx = (((a100 - a000) * gv + (a110 - a010) * fv) * gw + ((a101 - a001) * gv + (a111 - a011) * fv) * fw) / su
   local ozy = (((a010 - a000) * gu + (a110 - a100) * fu) * gw + ((a011 - a001) * gu + (a111 - a101) * fu) * fw) / sv
   local ozz = (c1 - c0) / sw
-  return ox, oy, oz, oxx, oyx, ozx, oxy, oyy, ozy, oxz, oyz, ozz
+  local cr = l.cr
+  local crunch = ((cr[n000] * gu + cr[n100] * fu) * gv + (cr[n010] * gu + cr[n110] * fu) * fv) * gw
+    + ((cr[n001] * gu + cr[n101] * fu) * gv + (cr[n011] * gu + cr[n111] * fu) * fv) * fw
+  return ox, oy, oz, oxx, oyx, ozx, oxy, oyy, ozy, oxz, oyz, ozz, crunch
 end
 
 -- A normal through the deformation (for small stretches: n - J^T n, normalised). The partials as sample()

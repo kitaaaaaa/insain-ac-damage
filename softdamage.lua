@@ -5,6 +5,7 @@
 -- This first version is for finding out what works in game: dents from buttons, Ctrl+click on the car, and
 -- (experimental) crashes; timings are shown in the window.
 local lattice = require('src/lattice')
+local noise = require('src/noise')
 
 local settings = ac.storage{
   depth = 0.12,        -- test dent: metres
@@ -12,10 +13,14 @@ local settings = ac.storage{
   spacing = 0.35,      -- lattice: metres between atoms (applies on rebuild)
   springs = 2,         -- spring passes after each dent (0 = a dent stays exactly where it's pushed)
   maxOffset = 0.5,     -- how far an atom can be pushed in total
-  autoRead = false,    -- read the car being watched without pressing the button
+  crunch = 1,          -- crunchy damage: noise on dented metal, more the harder the hit (0 = smooth dents)
+  crunchSize = 0.25,   -- metres: the size of the biggest creases (finer ones on top)
+  crunchStyle = 'creases', -- 'creases' (ridged noise: sharp folds, like crumpled metal) or 'hammered' (bumps)
+  maxCrunch = 0.06,    -- metres: the most the crunch moves the metal
+  readWatched = true,  -- read the car being watched without pressing the button
   method = 'direct',   -- how dents are shown: 'direct' (the car's own meshes changed) or 'copy' (our own copies
                        -- of the meshes, the originals hidden: createMesh crashed AC in test C)
-  crashes = false,     -- dents from crashes (experimental)
+  crashDents = true,   -- dents from crashes
   crashScale = 1,
   budgetMs = 4,        -- work per frame (setup and re-skinning)
 }
@@ -142,6 +147,7 @@ local function setupCar(i)
     for a = 1, 3 do min[a], max[a] = min[a] - 0.05, max[a] + 0.05 end
     body.min, body.max = min, max
     body.lattice = lattice.new(min, max, settings.spacing)
+    body.noiseOffset = {math.random() * 200, math.random() * 200, math.random() * 200}  -- each car crumples its own way
     -- every vertex in its lattice cell, so a dent only revisits the vertices near the atoms that moved
     local cells = {}
     for mi, mesh in ipairs(body.meshes) do
@@ -227,6 +233,10 @@ local function skin(body)
       local started, work, count = nowMs(), 0, 0
       local l = body.lattice
       local changed = {}
+      -- the crunch's noise, picked once for this pass
+      local crunchFn = settings.crunchStyle == 'hammered' and noise.fbm or noise.ridged
+      local cf, no = 1 / settings.crunchSize, body.noiseOffset
+      local withGrad = noise.withGrad
       for cell in pairs(lattice.takeChanged(l)) do
         local list = body.cells[cell]
         if list then
@@ -238,14 +248,28 @@ local function skin(body)
             end
             local raw, orig = mesh.work and mesh.work.raw, mesh.orig.raw
             local T = mesh.toMesh
-            local ox, oy, oz, ax, ay, az, bx, by, bz, cx, cy, cz
-            if raw then ox, oy, oz, ax, ay, az, bx, by, bz, cx, cy, cz = lattice.sample(l, mesh.px[v], mesh.py[v], mesh.pz[v]) end
+            local ox, oy, oz, ax, ay, az, bx, by, bz, cx, cy, cz, crunch
+            if raw then ox, oy, oz, ax, ay, az, bx, by, bz, cx, cy, cz, crunch = lattice.sample(l, mesh.px[v], mesh.py[v], mesh.pz[v]) end
             if ox then
+              local nx0, ny0, nz0 = mesh.nx[v], mesh.ny[v], mesh.nz[v]
+              local qx, qy, qz = lattice.bendNormal(nx0, ny0, nz0, ax, ay, az, bx, by, bz, cx, cy, cz)
+              -- crunch: the metal pushed in and out along its surface's normal by noise (creases ~crunchSize and
+              -- finer), as much as the crunch there; the normal tilts with the noise's slope
+              if crunch > 1e-4 then
+                local f = cf
+                local nn, gx, gy, gz = withGrad(crunchFn, mesh.px[v] * f + no[1], mesh.py[v] * f + no[2], mesh.pz[v] * f + no[3], 3, 0.5, 0.05)
+                local d = crunch * nn
+                ox, oy, oz = ox + nx0 * d, oy + ny0 * d, oz + nz0 * d
+                gx, gy, gz = gx * f * crunch, gy * f * crunch, gz * f * crunch  -- slope of the surface, per metre
+                local gn = gx * nx0 + gy * ny0 + gz * nz0
+                qx, qy, qz = qx - (gx - gn * nx0), qy - (gy - gn * ny0), qz - (gz - gn * nz0)
+                local ql = math.sqrt(qx * qx + qy * qy + qz * qz)
+                if ql > 1e-6 then qx, qy, qz = qx / ql, qy / ql, qz / ql end
+              end
               -- the offset into the mesh's own space
               raw[v].pos.x = orig[v].pos.x + T[1] * ox + T[4] * oy + T[7] * oz
               raw[v].pos.y = orig[v].pos.y + T[2] * ox + T[5] * oy + T[8] * oz
               raw[v].pos.z = orig[v].pos.z + T[3] * ox + T[6] * oy + T[9] * oz
-              local qx, qy, qz = lattice.bendNormal(mesh.nx[v], mesh.ny[v], mesh.nz[v], ax, ay, az, bx, by, bz, cx, cy, cz)
               local mx, my, mz = T[1] * qx + T[4] * qy + T[7] * qz, T[2] * qx + T[5] * qy + T[8] * qz, T[3] * qx + T[6] * qy + T[9] * qz
               local len = math.sqrt(mx * mx + my * my + mz * mz)
               if len > 0 then raw[v].normal.x, raw[v].normal.y, raw[v].normal.z = mx / len, my / len, mz / len end
@@ -299,13 +323,20 @@ local function repair(body)
 end
 
 -- A dent at a world position, pushed along a world direction.
-local function dentWorld(body, worldPos, worldDir, depth, radius)
+-- severity: how hard the hit was, 0..about 2 (a test dent: from its depth; a crash: from its speed). The crunch
+-- grows with it, faster than the dent does: a tap leaves a smooth dent, a big hit crumples the metal.
+local function crunchFor(depth, severity)
+  return settings.crunch * 0.4 * depth * math.min(2.5, severity) ^ 1.5
+end
+
+local function dentWorld(body, worldPos, worldDir, depth, radius, severity)
   if not body or body.state ~= 'ready' then return false end
   local w = body.node:getWorldTransformationRaw()
   local inv = w:inverse()
   local p = inv:transformPoint(worldPos)
   local d = inv:transformVector(worldDir):normalize()
-  lattice.dent(body.lattice, p.x, p.y, p.z, d.x, d.y, d.z, depth, radius, settings.maxOffset, settings.springs, 0.35)
+  lattice.dent(body.lattice, p.x, p.y, p.z, d.x, d.y, d.z, depth, radius, settings.maxOffset, settings.springs, 0.35,
+    crunchFor(depth, severity or depth / 0.1), settings.maxCrunch)
   body.dents = body.dents + 1
   body.lastDent = {x = p.x, y = p.y, z = p.z}
   skin(body)
@@ -339,36 +370,51 @@ local function dentSide(body, side)
 end
 
 -- ---------------------------------------------------------------------------------------------
--- Crashes (experimental): the velocity change from just before a contact, over 150 ms (an AC crash takes a
--- few frames); the dent goes where the car was hit, pushed the way the car was pushed.
+-- Crashes. An impact shows as a jump in the car's velocity: over 30 m/s2 (3 g; braking and cornering stay under
+-- about 2 g) in a frame, or AC reporting a contact (collisionDepth; AC's physics runs faster than the app's
+-- frames, so a contact can come and go between two of them: the velocity catches it either way). From there,
+-- the biggest change from the velocity just before it over 150 ms (an AC crash takes a few frames) is the hit:
+-- over 2.5 m/s it dents, where the car was hit (a ray from that side towards its middle), pushed the way the car
+-- was pushed, deeper and crunchier the harder. A teleport (over 5 m in a frame) isn't a crash.
+local IMPACT_ACCEL, IMPACT_WINDOW, MIN_HIT, COOLDOWN = 30, 0.15, 2.5, 0.3
 local crash = {}
 local function updateCrash(i, dt)
   local car = ac.getCar(i)
   local body = cars[i]
-  if not car or not body or body.state ~= 'ready' then return end
-  local c = crash[i] or {}
-  crash[i] = c
-  if car.collisionDepth > 0 and not c.at and c.prevVel then c.at, c.before, c.maxDv = 0, c.prevVel:clone(), vec3() end
+  if not car or not body or body.state ~= 'ready' or dt <= 0 then return end
+  local c = crash[i]
+  if not c then c = {prevVel = vec3():set(car.velocity), prevPos = vec3():set(car.position), cool = 0} crash[i] = c return end
+  c.cool = math.max(0, c.cool - dt)
+  local teleported = car.position:distanceSquared(c.prevPos) > 25
+  if teleported then c.at = nil end
+  local jump = (car.velocity - c.prevVel):length() / dt
+  if not c.at and not teleported and c.cool == 0 and (jump > IMPACT_ACCEL or car.collisionDepth > 0) then
+    c.at, c.before, c.maxDv = 0, c.prevVel:clone(), vec3()
+  end
   if c.at then
     c.at = c.at + dt
     local dv = car.velocity - c.before
     if dv:lengthSquared() > c.maxDv:lengthSquared() then c.maxDv:set(dv) end
-    if c.at > 0.15 then
+    if c.at >= IMPACT_WINDOW then
       local speed = c.maxDv:length()
       c.at = nil
-      if speed > 1.5 then
+      if speed > MIN_HIT then
+        c.cool = COOLDOWN
         local dir = c.maxDv:clone():normalize()
-        -- where it was hit: a ray from the obstacle's side, towards the middle of the car
-        local mid = car.position + car.up * 0.3
+        -- aimed at the middle of the body's box (in the body's own frame, so it's where the meshes are)
+        local mn, mx = body.min, body.max
+        local mid = body.node:getWorldTransformationRaw():transformPoint(vec3((mn[1] + mx[1]) / 2, (mn[2] + mx[2]) / 2, (mn[3] + mx[3]) / 2))
         local hit = hitCar(body, mid - dir * 6, dir) or (mid - dir * 1.5)
-        local depth = math.min(settings.maxOffset, (speed - 1.5) * 0.025 * settings.crashScale)
-        dentWorld(body, hit, dir, depth, 0.35 + 0.025 * speed)
+        local depth = math.min(settings.maxOffset, (speed - MIN_HIT) * 0.025 * settings.crashScale + 0.01)
+        trace('crash: car %d, %.1f m/s: dent %.3f m', i, speed, depth)
+        dentWorld(body, hit, dir, depth, 0.35 + 0.025 * speed, speed / 12)
         body.lastCrash = speed
+        body.crashes = (body.crashes or 0) + 1
       end
     end
   end
-  c.prevVel = c.prevVel or vec3()
   c.prevVel:set(car.velocity)
+  c.prevPos:set(car.position)
 end
 
 -- Repairs: going to the pits or being reset (ac.onCarJumped) mends the body.
@@ -390,7 +436,7 @@ end
 
 function script.update(dt)
   local i = sim.focusedCar
-  if settings.autoRead and i >= 0 and not cars[i] then setupCar(i) hookJumps(i) end
+  if settings.readWatched and i >= 0 and not cars[i] then setupCar(i) hookJumps(i) end
   -- Ctrl + left click on the car: a dent there, along the view
   local click = ac.isKeyDown(ac.KeyIndex.Control) and ac.isKeyDown(ac.KeyIndex.LeftButton)
   if click and not wasClick and cars[i] and cars[i].state == 'ready' then
@@ -400,7 +446,10 @@ function script.update(dt)
     if dist and dist >= 0 then dentWorld(body, ray.pos + ray.dir * dist, ray.dir, settings.depth, settings.radius) end
   end
   wasClick = click
-  if settings.crashes and not sim.isPaused then updateCrash(i, dt) end
+  -- every car that's been read
+  if settings.crashDents and not sim.isPaused and not sim.isReplayActive then
+    for ci in pairs(cars) do updateCrash(ci, dt) end
+  end
   runJobs()
   sendQueued()
 end
@@ -537,7 +586,8 @@ function script.windowMain(dt)
       body.meshCount or 0, body.skipped or 0, body.vertices, l.n[1], l.n[2], l.n[3]))
     ui.text(('Setup %.0f ms. Last re-skin: %d vertices, %.0f ms of work over %.0f ms.'):format(body.setupMs,
       body.lastSkinCount or 0, body.lastSkinMs or 0, body.lastSkinSpan or 0))
-    ui.text(('Dents: %d%s'):format(body.dents, body.lastCrash and ('; last crash %.1f m/s'):format(body.lastCrash) or ''))
+    ui.text(('Dents: %d (%d from crashes%s)'):format(body.dents, body.crashes or 0,
+      body.lastCrash and ('; last %.1f m/s'):format(body.lastCrash) or ''))
   end
   ui.separator()
   ui.text('Test dents:')
@@ -566,6 +616,7 @@ function script.windowMain(dt)
   for _, k in ipairs({'A', 'B', 'C', 'D', 'E'}) do if testResult[k] then ui.textWrapped(k .. ': ' .. testResult[k]) end end
   slider('depth', 'Dent depth: %.2f m', 0.01, 0.5)
   slider('radius', 'Dent radius: %.2f m', 0.1, 1.5)
+  slider('crunch', 'Crunch: %.0f%%', 0, 300, 100)
 end
 
 function script.windowSettings(dt)
@@ -573,12 +624,18 @@ function script.windowSettings(dt)
   slider('maxOffset', 'Most an atom moves: %.2f m', 0.1, 1)
   slider('spacing', 'Atom spacing: %.2f m (rebuild)', 0.15, 0.8)
   slider('budgetMs', 'Work per frame: %.1f ms', 1, 16)
-  if ui.checkbox('Read the car I\'m watching without the button', settings.autoRead) then settings.autoRead = not settings.autoRead end
+  if ui.checkbox('Read the car I\'m watching without the button', settings.readWatched) then settings.readWatched = not settings.readWatched end
   if ui.checkbox('Dent copies of the meshes (createMesh crashed AC in test C)', settings.method == 'copy') then
     settings.method = settings.method == 'copy' and 'direct' or 'copy'
   end
-  if ui.checkbox('Dents from crashes (experimental)', settings.crashes) then settings.crashes = not settings.crashes end
+  if ui.checkbox('Dents from crashes', settings.crashDents) then settings.crashDents = not settings.crashDents end
   slider('crashScale', 'Crash dent scale: %.2f', 0.1, 3)
+  slider('crunchSize', 'Crunch: biggest creases %.2f m', 0.04, 0.5)
+  slider('maxCrunch', 'Crunch: at most %.3f m', 0.005, 0.2)
+  local styles = {'creases', 'hammered'}
+  local pick = ui.combo('Crunch style', settings.crunchStyle == 'hammered' and 2 or 1, ui.ComboFlags.None,
+    {'Creases (crumpled metal)', 'Hammered (bumps)'})
+  if styles[pick] then settings.crunchStyle = styles[pick] end
   if ui.button('Rebuild (re-read the car)') then
     local i = sim.focusedCar
     if cars[i] then cars[i].state = 'replaced' restoreNow(cars[i]) end

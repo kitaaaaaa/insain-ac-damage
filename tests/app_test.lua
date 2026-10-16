@@ -4,6 +4,7 @@ package.path = './?.lua;' .. package.path
 local fails = 0
 local function check(c, msg) if not c then fails = fails + 1 print('FAIL: ' .. msg) end end
 local H = require('tests/scene_mock')({n = 20})
+H.storage.readWatched = false  -- (on by default; this test presses the button)
 local orig = H.bodyMesh.vertices:clone()
 local origDoor = H.doorMesh.vertices:clone()
 H.load()
@@ -44,8 +45,9 @@ local function press(label) H.buttons[label] = true H.frame() H.buttons[label] =
 
 -- the car's own meshes changed (the 'direct' way) for the checks below; the 'copy' way after them
 H.storage.method = 'direct'
--- a front dent: only vertices at the front move, and inward (-z)
+-- a front dent: only vertices at the front move, and inward (-z) (smooth: no crunch for these checks)
 H.storage.springs = 0
+H.storage.crunch = 0
 press('front')
 local n, d = moved(H.bodyMesh.vertices, orig, function(p) return p.z > 2.2 - 0.6 end)
 check(n > 0, 'front dent moves vertices: ' .. n)
@@ -65,6 +67,36 @@ for i = 0, orig.n - 1 do
 end
 check(bent, 'normals bent')
 check(H.altered.body and H.altered.body >= 1, 'body mesh sent')
+
+H.storage.crunch = 1
+-- crunch: the same dent with crunch is rough (vertices off the smooth dent, normals tilted); harder is rougher
+local function snapshot(buf) local c = {} for i = 0, buf.n - 1 do local p, q = buf.raw[i].pos, buf.raw[i].normal c[i] = {p.x, p.y, p.z, q.x, q.y, q.z} end return c end
+local function diff(a, b) local d, dn = 0, 0 for i, x in pairs(a) do
+  d = math.max(d, math.abs(x[1] - b[i][1]), math.abs(x[2] - b[i][2]), math.abs(x[3] - b[i][3]))
+  dn = math.max(dn, math.abs(x[4] - b[i][4]), math.abs(x[5] - b[i][5]), math.abs(x[6] - b[i][6])) end return d, dn end
+press('Repair')
+H.storage.crunch = 0
+press('front')
+local smooth = snapshot(H.bodyMesh.vertices)
+press('Repair')
+H.storage.crunch = 1
+press('front')
+local rough1 = snapshot(H.bodyMesh.vertices)
+local d1, dn1 = diff(smooth, rough1)
+check(d1 > 0.002 and d1 <= H.storage.maxCrunch + 1e-6 and dn1 > 0.05, ('crunch: off the smooth dent by up to %.4f m, normals tilted %.3f'):format(d1, dn1))
+press('Repair')
+check(moved(H.bodyMesh.vertices, orig) == 0, 'repair clears the crunch too')
+H.storage.depth = 0.03
+press('front')
+local light = snapshot(H.bodyMesh.vertices)
+press('Repair')
+H.storage.crunch = 0
+press('front')
+local lightSmooth = snapshot(H.bodyMesh.vertices)
+local dl = diff(lightSmooth, light)
+check(dl < d1 * 0.25, ('a light dent is much less crunchy: %.4f vs %.4f'):format(dl, d1))
+press('Repair')
+H.storage.depth, H.storage.crunch = 0.12, 1
 
 -- left: the +x side
 press('Repair')
@@ -88,22 +120,78 @@ H.jumps[0](0)
 H.settle()
 check(moved(H.bodyMesh.vertices, orig) == 0, 'reset repairs')
 
--- a crash: the car stopped from 15 m/s by something in front
-H.storage.crashes = true
+-- crashes (on by default). The car drives forward (+z in its frame)
+H.storage.crunch = 1
+check(H.storage.crashDents == true, 'crash dents on by default')
 local fwd = H.bodyWorld:transformVector(vec3(0, 0, 1))
-H.car.velocity:set(fwd * 15) H.frame()
-H.car.collisionDepth = 0.1
-H.car.velocity:set(fwd * 1) for _ = 1, 12 do H.frame() end
-H.car.collisionDepth = 0
+-- speeds change like a car's (5 m/s2, half a g), unless a test means a hit
+local current = 0
+local function drive(speed, frames)
+  for _ = 1, frames do
+    current = current < speed and math.min(speed, current + 5 / 60) or math.max(speed, current - 5 / 60)
+    H.car.velocity:set(fwd * current) H.frame()
+  end
+end
+local function cruise(speed) drive(speed, math.ceil(math.abs(speed - current) * 12) + 40) end
+local function hit(to) current = to H.car.velocity:set(fwd * to) H.frame() end
+local function crashes() return body.crashes or 0 end
+H.car.velocity:set(0, 0, 0) H.frame()
+press('Repair')
+cruise(15)
+-- a wall: 15 m/s to 1 m/s in one frame, and AC reporting no contact at all (missed between frames)
+local before = crashes()
+hit(1)
+drive(1, 30)
 H.settle()
 n = moved(H.bodyMesh.vertices, orig, function(p) return p.z > 2.2 - 1.2 end)
-check(body.lastCrash and body.lastCrash > 13 and n > 0, 'crash: a dent at the front: ' .. n .. ' ' .. tostring(body.lastCrash))
+check(crashes() == before + 1 and n > 0, 'a wall hit without a contact reported: one dent at the front: ' .. n)
+check(math.abs(body.lastCrash - 14) < 0.5, 'its speed: ' .. tostring(body.lastCrash))
+-- hard braking (0.9 g for 2 s): no dent
+cruise(20)
+before = crashes()
+local v = 20
+for _ = 1, 120 do v = math.max(0, v - 9 / 60) H.car.velocity:set(fwd * v) H.frame() end
+current = 0
+check(crashes() == before, 'hard braking: no dent')
+-- a teleport (back to the pits: 50 m away, stopped): no dent
+cruise(20)
+before = crashes()
+local p = H.car.position
+H.car.position = vec3(p.x + 50, p.y, p.z) hit(0)
+drive(0, 30)
+H.car.position = p hit(0)  -- (back where the mock's body is)
+drive(0, 30)
+check(crashes() == before, 'teleport: no dent')
+-- AC's contact report alone (a scrape at low speed, 2 m/s lost): under 2.5 m/s, no dent
+cruise(5)
+before = crashes()
+H.car.collisionDepth = 0.05 hit(3) H.car.collisionDepth = 0
+drive(3, 20)
+check(crashes() == before, 'a light scrape: no dent')
+-- harder hits: deeper and crunchier
+local function hitAt(speed)
+  cruise(speed)
+  press('Repair')
+  hit(0)
+  drive(0, 30)
+  H.settle()
+  local l, maxOff, maxCr = body.lattice, 0, 0
+  for i = 0, l.count - 1 do
+    maxOff = math.max(maxOff, math.sqrt(l.dx[i] ^ 2 + l.dy[i] ^ 2 + l.dz[i] ^ 2))
+    maxCr = math.max(maxCr, l.cr[i])
+  end
+  return maxOff, maxCr
+end
+local o1, c1 = hitAt(8)
+local o2, c2 = hitAt(20)
+check(o2 > o1 * 1.5 and c2 > c1 * 1.5 and c2 <= H.storage.maxCrunch + 1e-9, ('harder hit (crunch capped at maxCrunch): deeper (%.3f vs %.3f) and crunchier (%.4f vs %.4f)'):format(o2, o1, c2, c1))
+press('Repair')
 
 -- the 'copy' way: the first dent makes a copy (same node, same material), hides the original, leaves its
 -- vertices alone; the copy takes the dents
 press('Repair')
 H.storage.method = 'copy'
-H.storage.crashes = false
+H.storage.crashDents = false
 local altered = H.altered.body or 0
 press('front')
 local copy = H.created[#H.created]
