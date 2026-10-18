@@ -135,9 +135,10 @@ nose just slows the car; a hit at a rear corner also spins it. From how much the
 an instant, the app works out where the push came from and how hard it was. A push straight along the car doesn't
 say how far along it landed, and in a hard hit the car pitches, which would make the contact look high up, so
 for level hits the app looks for the car's outside from the push's side, at bumper height, on its hull: a hard
-head-on hit dents the front, not the windscreen. Braking and cornering change the
-speed far more gently than a crash does, so they don't count. Landing a jump is mostly the suspension's job, so
-it dents little.
+head-on hit dents the front, not the windscreen. A dent needs AC to report a contact (or a hit so sudden no
+tyre could have done it), so braking and cornering never dent, however hard a fast car does them; and only the
+hit's own change counts, not the braking or cornering going on around it. A light contact (a door bang, a
+clipped wall) leaves a light dent. Landing a jump is mostly the suspension's job, so it dents little.
 
 ## The window
 

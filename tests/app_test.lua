@@ -315,12 +315,49 @@ drive(0, 30)
 H.car.position = p hit(0)  -- (back where the mock's body is)
 drive(0, 30)
 check(crashes() == before, 'teleport: no dent')
--- AC's contact report alone (a scrape at low speed, 2 m/s lost): under 2.5 m/s, no dent
+-- AC's contact report with a light hit (a scrape at low speed, 2 m/s lost): under 2.5 m/s, a light dent
 cruise(5)
+press('Repair')
+H.settle()
 before = crashes()
 H.car.collisionDepth = 0.05 hit(3) H.car.collisionDepth = 0
 drive(3, 20)
-check(crashes() == before, 'a light scrape: no dent')
+H.settle()
+local _, lightDepth = moved(H.bodyMesh.vertices, orig)
+check(crashes() == before + 1 and lightDepth > 0 and lightDepth < 0.02, 'a light scrape: a light dent: ' .. lightDepth)
+-- a fast car's braking: 4 g for 1.5 s, no contact: no dent (over 3 g, but no contact and nothing a tyre can't do)
+cruise(60)
+press('Repair')
+H.settle()
+before = crashes()
+v = 60
+for _ = 1, 90 do v = math.max(0, v - 40 / 60) H.car.velocity:set(fwd * v) H.frame() end
+current = v
+check(crashes() == before, '4 g braking without a contact: no dent')
+-- a contact while braking at 4 g: only the hit counts (1.5 m/s more lost in a frame), not the braking around it
+cruise(60)
+press('Repair')
+H.settle()
+before = crashes()
+v = 60
+for _ = 1, 30 do v = v - 40 / 60 H.car.velocity:set(fwd * v) H.frame() end
+v = v - 1.5 H.car.collisionDepth = 0.05 H.car.velocity:set(fwd * v) H.frame() H.car.collisionDepth = 0
+for _ = 1, 30 do v = math.max(0, v - 40 / 60) H.car.velocity:set(fwd * v) H.frame() end
+current = v
+H.settle()
+check(crashes() == before + 1 and body.lastCrash and body.lastCrash < 2.5, 'a hit while braking: the hit alone (' .. tostring(body.lastCrash) .. ' m/s)')
+-- doors banging: at 20 m/s, a car alongside pushes 1 m/s sideways: a light dent on that side
+cruise(20)
+press('Repair')
+H.settle()
+before = crashes()
+local side = H.bodyWorld:transformVector(vec3(1, 0, 0))
+H.car.collisionDepth = 0.02 H.car.velocity:set(fwd * 20 - side * 1) H.frame() H.car.collisionDepth = 0
+for _ = 1, 20 do H.car.velocity:set(fwd * 20 - side * 1) H.frame() end
+H.car.velocity:set(fwd * 20) H.frame()
+H.settle()
+local nSide, sideDepth = moved(H.bodyMesh.vertices, orig, function(p) return p.x > 0.3 end)
+check(crashes() == before + 1 and nSide > 0 and sideDepth < 0.02, 'doors banging: a light dent on the side hit: ' .. nSide .. ', ' .. sideDepth)
 -- harder hits: deeper and crunchier
 local function hitAt(speed)
   cruise(speed)

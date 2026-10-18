@@ -1170,11 +1170,16 @@ end
 -- from its size). The spin comes from how the car's own axes turn between frames, with the same cross product,
 -- so the signs agree whatever the world's handedness. A hit at the tail mostly spins the car: what counts is the
 -- change at the contact point, dv + dw x r.
--- An impact starts with a jump over 3 g (braking and cornering stay under about 2 g) at the middle or, through
--- the spin, at the ends, or AC reporting a contact (contacts can come and go between frames); the biggest change
--- over the next 150 ms is the hit, and from 2.5 m/s at the contact point it dents there. A push from below (a
+-- An impact starts with a jump over 3 g at the middle or, through the spin, at the ends, or AC reporting a contact;
+-- the biggest change over the next 150 ms is the hit. The change is counted from how the car was already
+-- accelerating just before (braking, cornering), so only the hit's own part counts. It dents only if AC reported a
+-- contact during it (or 0.1 s before), or if it was so sudden no tyre could have done it (contacts can come and go
+-- between frames in a hard hit): a jump over 8 g level in the car's frame, and over twice what its tyres can give
+-- with the load on them now (fast cars with big downforce brake and corner over 3 g). From 2.5 m/s at the contact
+-- point it dents as before; under that, with a contact, lightly (a door bang, a clipped wall). A push from below (a
 -- landing) counts 15%: the suspension takes it. A teleport (over 5 m in a frame) isn't a crash.
 local IMPACT_ACCEL, IMPACT_WINDOW, MIN_HIT, COOLDOWN, FROM_BELOW = 30, 0.15, 2.5, 0.3, 0.15
+local CONTACT_GRACE, NO_CONTACT_ACCEL, TYRE_MU, LIGHT_MIN = 0.1, 80, 2.0, 0.3
 local STEP = 3  -- m/s: a hit still building gets more dent each time it's this much harder
 local crash = {}
 
@@ -1195,7 +1200,11 @@ end
 local crashQueue = {}
 
 -- A crash's dent: r (world) from the car's middle, pushed along dir (world).
-local function crashDepth(speed) return (speed - MIN_HIT) * 0.025 * settings.crashScale + 0.01 end
+local function crashDepth(speed)
+  -- under MIN_HIT (a light contact): 3 mm up to the 1 cm a MIN_HIT hit makes
+  if speed < MIN_HIT then return 0.003 + 0.007 * math.max(0, speed) / MIN_HIT end
+  return (speed - MIN_HIT) * 0.025 * settings.crashScale + 0.01
+end
 local function makeCrashDent(i, body, r, dir, speed, dvLen, along, from)
   -- the push mostly level in the car's frame: a hard crash's speed change often has a big up or down part (AC
   -- lifting or pressing the car), which aimed dents down onto the bonnet instead of into the bumper. Kept as it is
@@ -1314,7 +1323,7 @@ local function updateCrash(i, dt)
   local c = crash[i]
   if not c then
     c = {prevVel = vec3():set(car.velocity), prevPos = vec3():set(car.position), prevLook = vec3():set(car.look),
-      prevUp = vec3():set(car.up), w = {0, 0, 0}, cool = 0}
+      prevUp = vec3():set(car.up), w = {0, 0, 0}, cool = 0, acc = vec3(), sinceContact = 1e9}
     crash[i] = c
     return
   end
@@ -1332,23 +1341,47 @@ local function updateCrash(i, dt)
   local wx, wy, wz = spin(c, car, dt)
   if teleported then c.at = nil wx, wy, wz = c.w[1], c.w[2], c.w[3] end
   local vel, pv = car.velocity, c.prevVel
-  local jump = math.sqrt((vel.x - pv.x) ^ 2 + (vel.y - pv.y) ^ 2 + (vel.z - pv.z) ^ 2) / dt
+  local ax_, ay_, az_ = (vel.x - pv.x) / dt, (vel.y - pv.y) / dt, (vel.z - pv.z) / dt
+  local jump = math.sqrt(ax_ * ax_ + ay_ * ay_ + az_ * az_)
   local spinJump = math.sqrt((wx - c.w[1]) ^ 2 + (wy - c.w[2]) ^ 2 + (wz - c.w[3]) ^ 2) / dt * halfLen
-  if not c.at and not teleported and c.cool == 0 and (jump + spinJump > IMPACT_ACCEL or car.collisionDepth > 0) then
+  -- level in the car's frame (no up or down part: landings, kerbs)
+  local up = car.up
+  local au = ax_ * up.x + ay_ * up.y + az_ * up.z
+  local levelJump = math.sqrt(math.max(0, jump * jump - au * au))
+  local contact = car.collisionDepth > 0
+  c.sinceContact = contact and 0 or c.sinceContact + dt
+  if not c.at and not teleported and c.cool == 0 and (jump + spinJump > IMPACT_ACCEL or contact) then
     c.at, c.before, c.maxDv, c.dented = 0, c.prevVel:clone(), vec3(), 0
     c.wBefore = {c.w[1], c.w[2], c.w[3]}
+    c.aBefore = c.acc:clone()
+    c.touched = c.sinceContact <= CONTACT_GRACE
+    c.peakLevel = 0
   end
   if c.at then
     c.at = c.at + dt
-    local b = c.before
-    local ex, ey, ez = vel.x - b.x, vel.y - b.y, vel.z - b.z
+    if contact then c.touched = true end
+    c.peakLevel = math.max(c.peakLevel, levelJump)
+    -- the hit's own change: from the velocity it would have had, still accelerating as just before
+    local b, ab, t = c.before, c.aBefore, c.at
+    local ex, ey, ez = vel.x - b.x - ab.x * t, vel.y - b.y - ab.y * t, vel.z - b.z - ab.z * t
     if ex * ex + ey * ey + ez * ez > c.maxDv:lengthSquared() then c.maxDv:set(ex, ey, ez) end
     -- dent as soon as the hit is clear, the first frame if it can be: then, if it keeps building over the window
     -- (a hit lasting a few frames), the rest at once as it comes (STEP at a time). Cars not read yet: at the end
     local done = c.at >= IMPACT_WINDOW
-    if ready or done then
+    -- a real hit: AC reported a contact, or it was too sudden for the tyres (twice what they can give now, from
+    -- their load: AC's loads are only right for this client's own cars)
+    local real = c.touched
+    if not real and c.peakLevel > NO_CONTACT_ACCEL then
+      local load, mass = 0, car.mass
+      if not car.isRemote and mass and mass > 0 and car.wheels then
+        for w = 0, 3 do local wh = car.wheels[w] if wh and wh.load then load = load + wh.load end end
+      end
+      real = c.peakLevel > 2 * TYRE_MU * load / math.max(mass or 1, 1)
+    end
+    if real and (ready or done) then
       local r, rl, dir, speed, dvLen, ax, ay, az = crashHit(car, body, ready, c, wx, wy, wz, L, Wd, Hd)
-      if speed and speed > MIN_HIT and dvLen > 1e-3 and speed >= c.dented + (c.dented > 0 and STEP or 0) then
+      local least = c.touched and LIGHT_MIN or MIN_HIT
+      if speed and speed > least and dvLen > 1e-3 and speed >= c.dented + (c.dented > 0 and STEP or 0) then
         if ready then
           -- one impact, one place and one way: what it adds as it builds goes where the first dent went
           local W = body.node:getWorldTransformationRaw()
@@ -1381,6 +1414,10 @@ local function updateCrash(i, dt)
       c.at = nil
       if c.dented > 0 then c.cool = COOLDOWN end
     end
+  end
+  if not c.at and not teleported then
+    local k = math.min(1, dt / 0.1)
+    c.acc:set(c.acc.x + (ax_ - c.acc.x) * k, c.acc.y + (ay_ - c.acc.y) * k, c.acc.z + (az_ - c.acc.z) * k)
   end
   c.w[1], c.w[2], c.w[3] = wx, wy, wz
   c.prevVel:set(car.velocity)
