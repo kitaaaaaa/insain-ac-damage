@@ -3,7 +3,7 @@
 package.path = './?.lua;' .. package.path
 local fails = 0
 local function check(c, msg) if not c then fails = fails + 1 print('FAIL: ' .. msg) end end
-local H = require('tests/scene_mock')({n = 20})
+local H = require('tests/scene_mock')({n = 20, lights = {HEADER = {VERSION = {'3'}}, LIGHT_0 = {NAME = {'headlight_glass'}}}})
 H.storage.readWatched = false  -- (on by default; this test presses the button)
 H.storage.atoms = os.getenv('ATOMS') or 'hull'
 print('atoms: ' .. H.storage.atoms)
@@ -264,9 +264,13 @@ H.storage.crunch = 0
 local lensBefore = H.lensMesh.vertices:copy()
 press('front')
 check(moved(H.lensMesh.vertices, lensBefore) > 0, 'the lens dents')
+local function glow(m) local e = m.emissive return e and (e.x + e.y + e.z) or 15 end
+check(glow(H.lensMesh) == 0 and H.lensMesh.unique and not H.sharedMaterialSet, 'a light in lights.ini, dented: off, on its own material')
+check(glow(H.bodyMesh) == 15, 'the body (not a light) keeps its glow')
 H.lightsNode.world = H.compose(H.bodyWorld, H.rotY(0, 0, 0.2, 0))  -- lifted 20 cm on the body
 press('back')
 check(moved(H.lensMesh.vertices, lensBefore) == 0, 'a part that moves on the body: put back')
+check(glow(H.lensMesh) == 15, 'and its light back on')
 press('front')
 check(moved(H.lensMesh.vertices, lensBefore) == 0, 'and not dented again')
 H.lightsNode.world = H.bodyWorld

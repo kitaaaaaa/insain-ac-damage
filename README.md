@@ -39,6 +39,7 @@ you. The top line of its window shows how far it's got. From then on:
 - **Crash**, and the car dents where it was hit, in the direction it was pushed. A tap leaves a shallow,
   smooth dent; a big hit leaves a deep, crumpled one. Dents add up: hit the same corner twice and it gets worse.
 - **Other cars** dent in their crashes too, AI or other players online.
+- **Lights** (the meshes named in the car's lights.ini) go out once a dent reaches them, and come back on when the car's repaired.
 - **Go back to the pits** (or reset the car) and it's repaired.
 - **Repair slowly**, as in Carmageddon: hold the **Repair slowly** button and the damage goes back a bit at a
   time, dents easing out and bent wheels straightening; let go and it stops where it got to. Bind it to a key

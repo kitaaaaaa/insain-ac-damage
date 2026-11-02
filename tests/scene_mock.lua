@@ -136,6 +136,14 @@ return function(opts)
   for a = 0, 4 do for b = 0, 4 do lens[#lens + 1] = {0.4 + a * 0.05, 0.6 + b * 0.05, 2.19, 0, 0, 1} end end
   H.lensMesh = {name = 'headlight_glass', parent = H.lightsNode, vertices = buffer(sc(lens))}
   H.lightsNode.meshes = {H.lensMesh}
+  -- (opts.brakeLight: a brake light on a node of its own, named so it reads as a brake)
+  if opts.brakeLight then
+    local bl = {}
+    for a = 0, 4 do for b = 0, 4 do bl[#bl + 1] = {0.4 + a * 0.05, 0.6 + b * 0.05, -2.19, 0, 0, -1} end end
+    local blNode = node('BRAKE_LIGHTS', H.bodyWorld, root)
+    H.brakeLightMesh = {name = 'brake_light_l', parent = blNode, vertices = buffer(sc(bl))}
+    blNode.meshes = {H.brakeLightMesh}
+  end
   local wheel = node('WHEEL_LF', H.compose(H.bodyWorld, H.rotY(0, 0.8 * S, 0.3 * S, 1.4 * S)), root)
   H.wheelMesh = {name = 'tyre_lf', parent = wheel, vertices = buffer(sc({{0, 0, 0, 1, 0, 0}, {0, 0.1, 0, 1, 0, 0}, {0, 0, 0.1, 1, 0, 0}}))}
   if opts.replacementWheel then
@@ -200,7 +208,23 @@ return function(opts)
     H.created[#H.created + 1] = m
     return ref({m})
   end
-  function Ref:assignMaterialFrom(other) self.items[1].material = other.items[1].name return self end
+  function Ref:assignMaterialFrom(other) self.items[1].material = other.items[1].name self.items[1].emissive = other.items[1].emissive return self end
+  -- materials: each mesh's glow (ksEmissive), lit to start; set only on a mesh's own material
+  function Ref:ensureUniqueMaterials() for _, m in ipairs(self.items) do m.unique = true end return self end
+  function Ref:getMaterialPropertyValue(a, b)
+    local prop, m = b or a, self.items[type(a) == 'number' and a or 1]
+    if prop ~= 'ksEmissive' or not m then return nil end
+    return (m.emissive or vec3(5, 5, 5)):clone()
+  end
+  function Ref:setMaterialProperty(prop, v)
+    for _, m in ipairs(self.items) do
+      if prop == 'ksEmissive' then
+        if not m.unique then H.sharedMaterialSet = true end
+        m.emissive = v:clone()
+      end
+    end
+    return self
+  end
   function Ref:setVisible(v) for _, m in ipairs(self.items) do m.hidden = not v end return self end
   function Ref:dispose()
     for _, m in ipairs(self.items) do
@@ -264,6 +288,9 @@ return function(opts)
     getSim = function() return sim end,
     getCar = function(i) if i == 0 then return car elseif i == 1 and (opts.cars or 1) > 1 then return car2 end return nil end,
     log = function(...) local t = {} for i = 1, select('#', ...) do t[i] = tostring(select(i, ...)) end H.logs[#H.logs + 1] = table.concat(t, ' ') end,
+    INIConfig = {carData = function(i, file)
+      return {sections = file == 'lights.ini' and (opts.lights or {}) or {}}
+    end},
     findNodes = function(f) for _, n in ipairs(nodes) do if n.name == f then return ref({n}) end end return ref({}) end,
     forceDetailedCarLOD = function(i) H.detailed[i] = (H.detailed[i] or 0) + 1 end,
     -- bindable buttons (held: H.controls[name] = true) and events between apps (every one kept in H.shared)

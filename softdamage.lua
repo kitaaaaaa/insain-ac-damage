@@ -180,6 +180,41 @@ local function wheelOf(wheels, mn, mx)
   return nil
 end
 
+-- The car's light meshes, by name: the NAME of each [LIGHT_n] and [BRAKE_n] in its lights.ini.
+local function lightMeshes(i)
+  local names = {}
+  local ok, ini = pcall(ac.INIConfig.carData, i, 'lights.ini')
+  if ok and ini and ini.sections then
+    for section, keys in pairs(ini.sections) do
+      if (section:find('^LIGHT_%d+$') or section:find('^BRAKE_%d+$')) and keys.NAME and keys.NAME[1] then
+        names[keys.NAME[1]] = section
+      end
+    end
+  end
+  return names
+end
+
+-- A light dented (any of its vertices moved): turned off, its glow (ksEmissive) set to nothing on its own
+-- material (so other meshes sharing it stay lit). Back on when the car's repaired.
+local function lightOff(mesh)
+  local r = mesh.copy or mesh.ref
+  r:ensureUniqueMaterials()
+  local e = r:getMaterialPropertyValue('ksEmissive')
+  if e == nil then trace('light "%s" (%s): no ksEmissive, left on', mesh.name, mesh.light) mesh.lightOff = true return end
+  local zero = type(e) == 'number' and 0 or (e.w ~= nil and vec4(0, 0, 0, 0) or vec3(0, 0, 0))
+  r:setMaterialProperty('ksEmissive', zero)
+  mesh.lightOff, mesh.lightRef, mesh.emissive = true, r, e
+  trace('light "%s" (%s): dented, turned off (ksEmissive was %s)', mesh.name, mesh.light, tostring(e))
+end
+local function lightOn(mesh)
+  if not mesh.lightOff then return end
+  if mesh.lightRef and mesh.emissive ~= nil then
+    mesh.lightRef:setMaterialProperty('ksEmissive', mesh.emissive)
+    trace('light "%s" (%s): repaired, back on', mesh.name, mesh.light)
+  end
+  mesh.lightOff, mesh.lightRef, mesh.emissive = nil, nil, nil
+end
+
 -- Reads the body meshes of car i: their vertices in the body's own coordinates (BODYTR space), once.
 local function setupCar(i)
   local body = {index = i, meshes = {}, vertices = 0, state = 'reading meshes', setupMs = 0, lastSkinMs = 0, dents = 0}
@@ -221,13 +256,15 @@ local function setupCar(i)
       under[meshes:name(m)] = true
     end
     trace('car %d: %d meshes under BODYTR', i, #list)
+    local lights = lightMeshes(i)
     if settings.outsideBody then
       local all = root:findMeshes('?')
       for m = 1, all:size() do
         local name = all:name(m)
         if not under[name] then
           local ref = all:at(m)
-          local moving = movingPart(ref, name)
+          -- (a light in lights.ini isn't a moving part, whatever it's called: a BRAKE_LIGHT isn't a brake)
+          local moving = not lights[name] and movingPart(ref, name)
           local turns = moving and (moving:upper():find('WHEEL', 1, true) or moving:upper():find('RIM', 1, true)
             or moving:upper():find('TYRE', 1, true) or moving:upper():find('TIRE', 1, true))
           if turns then
@@ -326,6 +363,8 @@ local function setupCar(i)
           body.meshes[#body.meshes + 1] = mesh
           item.mesh = mesh
           body.vertices = body.vertices + mesh.n
+          mesh.light = lights[name]
+          if mesh.light then trace('mesh %d/%d: a light (%s in lights.ini)', m, body.meshCount, mesh.light) end
         end
         trace('mesh %d/%d: read', m, body.meshCount)
       end
@@ -636,11 +675,14 @@ end
 -- mesh is made under the same node with the same material and the original hidden; the copy takes them.
 local function send(mesh)
   if not mesh.work then return end
+  if mesh.lightBack then mesh.lightBack = nil lightOn(mesh) end
+  if mesh.light and not mesh.lightOff and (mesh.movedCount or 0) > 0 then mesh.lightPending = true end
   if settings.method == 'direct' and not mesh.copy then
     if not mesh.sent then trace('alterVertices "%s" (%d vertices), first time', mesh.name, mesh.n) end
     mesh.ref:alterVertices(mesh.work)
     if not mesh.sent then trace('alterVertices "%s": done', mesh.name) end
     mesh.sent = true
+    if mesh.lightPending then mesh.lightPending = nil lightOff(mesh) end
     return
   end
   if not mesh.copy then
@@ -663,6 +705,7 @@ local function send(mesh)
   if not mesh.sent then trace('alterVertices on the copy of "%s", first time', mesh.name) end
   mesh.copy:alterVertices(mesh.work)
   if not mesh.sent then trace('alterVertices on the copy of "%s": done', mesh.name) mesh.sent = true end
+  if mesh.lightPending then mesh.lightPending = nil lightOff(mesh) end
 end
 
 -- Moves one vertex with the atoms (into mesh.work) and says if it changed. Its own function: the loop around it
@@ -814,6 +857,8 @@ local function skin(body)
               mesh.movedCount = 0
               changed[mesh] = true
             end
+            mesh.lightPending = nil
+            if mesh.lightOff then mesh.lightBack = true end  -- (put back: its light back on as it's sent)
             trace('"%s" (outside BODYTR) moves on the body: not dented from now on', mesh.name)
             for _, part in ipairs(body.parts) do if part.mesh == mesh then part.status = part.status .. '; moves on the body: no longer dented' end end
           end
@@ -909,6 +954,8 @@ local function restoreNow(body)
     end
   end
   for _, mesh in ipairs(body and body.meshes or {}) do
+    lightOn(mesh)
+    mesh.lightPending = nil
     if mesh.copy then
       mesh.copy:dispose()
       mesh.copy = nil
@@ -1006,7 +1053,7 @@ local function repair(body)
   if not body or not body.atoms then return end
   if body.kind == 'hull' then hull.reset(body.atoms) else lattice.reset(body.atoms) end
   body.dents = 0
-  for _, mesh in ipairs(body.meshes) do stopBending(mesh) end
+  for _, mesh in ipairs(body.meshes) do stopBending(mesh) lightOn(mesh) mesh.lightPending = nil end
   straightenWheels(body)
   body.instantNext = true  -- (a repair is at once)
   skin(body)

@@ -142,7 +142,8 @@ check(c6[1] and c6[1].state == 'reading meshes', 'the other car still being read
 check(frames < 30, ('the dent showed after %d frames, before the reading finished'):format(frames))
 -- car to car: the watched car rear-ends the other (AC's contact says car 1): the other's rear dents about as much
 -- as the watched car's front, and once (its own reading of the hit is dropped)
-local H7 = require('tests/scene_mock')({n = 12, cars = 2, ahead = true})
+local H7 = require('tests/scene_mock')({n = 12, cars = 2, ahead = true, brakeLight = true,
+  lights = {LIGHT_0 = {NAME = {'headlight_glass'}}, BRAKE_0 = {NAME = {'brake_light_l'}}}})
 H7.storage.atoms = os.getenv('ATOMS') or 'hull'
 H7.load()
 H7.settle()
@@ -188,6 +189,15 @@ check(d0 > 0.02 and n0 > 0, 'the watched car\'s front dents')
 check(d1 > 0.02 and n1 > 0, 'the other car\'s rear dents')
 check(d1 > d0 * 0.6 and d1 < d0 / 0.6, 'about as much')
 check((c7[0].crashes or 0) == 1 and (c7[1].crashes or 0) == 1, 'once each')
+local function glow(m) local e = m.emissive return e and (e.x + e.y + e.z) or 15 end
+check(glow(H7.lensMesh) == 0, 'the headlight (in lights.ini) in the dented front: off')
+local bl
+for _, m in ipairs(c7[0].meshes) do if m.name == 'brake_light_l' then bl = m end end
+check(bl and bl.light == 'BRAKE_0', 'a brake light under a BRAKE_ node, in lights.ini: read, a light')
+H7.jumps[0](0)
+H7.settle()
+for _ = 1, 5 do H7.frame() end
+check(glow(H7.lensMesh) == 15, 'repaired: back on')
 for _, b in pairs(c7) do check(not b.error, 'no errors: ' .. tostring(b.error)) end
 for _, b in pairs(cars) do check(not b.error, 'no errors: ' .. tostring(b.error)) end
 print(fails == 0 and 'cars test passed' or ('cars test: ' .. fails .. ' failed'))
