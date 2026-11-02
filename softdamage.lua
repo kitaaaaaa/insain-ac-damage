@@ -1278,6 +1278,69 @@ end
 
 local requestSetup  -- (below)
 
+-- A crash kept for a car not read yet (rl, dirL in its own axes); the three hardest are enough. The entry, if kept.
+local function addPending(i, rl, dirL, speed, dvLen)
+  local p = pending[i] or {}
+  pending[i] = p
+  if #p >= 3 then
+    local weakest = 1
+    for k = 2, #p do if p[k].speed < p[weakest].speed then weakest = k end end
+    if p[weakest].speed < speed then table.remove(p, weakest) end
+  end
+  if #p >= 3 then return nil end
+  local e = {r = {rl.x, rl.y, rl.z}, dir = {dirL.x, dirL.y, dirL.z}, speed = speed, dvLen = dvLen}
+  p[#p + 1] = e
+  trace('crash: car %d (not read yet), %.1f m/s: reading it to dent it', i, speed)
+  requestSetup(i, true)
+  return e
+end
+
+-- The middle of a car's body box (world): its body's once read, AC's bounding box till then.
+local function carMiddle(i, car)
+  local body = cars[i]
+  if body and body.state == 'ready' then
+    local mn, mx = body.min, body.max
+    return body.node:getWorldTransformationRaw():transformPoint(vec3((mn[1] + mx[1]) / 2, (mn[2] + mx[2]) / 2, (mn[3] + mx[3]) / 2))
+  end
+  if car.bodyTransform and car.aabbCenter then return car.bodyTransform:transformPoint(car.aabbCenter) end
+  return vec3():set(car.position)
+end
+
+-- Car i's hit was with car j (AC's contact says so): j gets the same hit at the same place, pushed the other way
+-- (rear-end a car and its rear dents about as much as your front), through the same dent. j's own reading of this
+-- hit is dropped (its window closed, cooling down), so it isn't counted twice; a hit still building adds to it.
+local function mirrorCrash(i, j, p, dir, speed, dvLen)
+  local car = ac.getCar(j)
+  if not car or j == i then return end
+  local cj = crash[j]
+  if not cj then return end
+  local base
+  if cj.cool > 0 then
+    if cj.by ~= i then return end  -- j's already taken this hit itself
+    base = cj.byLevel
+  else
+    base = cj.at and cj.dented or 0
+  end
+  if speed <= base then return end
+  local body = cars[j]
+  local r = p - carMiddle(j, car)
+  local dj = -dir
+  if body and body.state == 'ready' then
+    local rl = body.node:getWorldTransformationRaw():inverse():transformVector(r)
+    crashDent(j, body, r, dj, speed, dvLen, rl.z, base)
+    cj.byEntry = nil
+  elseif cj.byEntry and cj.by == i and cj.cool > 0 then
+    cj.byEntry.speed = speed  -- (waiting for the car to be read: the kept dent just gets harder)
+  elseif j == sim.focusedCar or totalVertices() < settings.maxVertices then
+    local ax, ay, az = carAxes(car)
+    cj.byEntry = addPending(j, vec3(r:dot(ax), r:dot(ay), r:dot(az)), vec3(dj:dot(ax), dj:dot(ay), dj:dot(az)), speed, dvLen)
+  else
+    return
+  end
+  trace('crash: car %d hit car %d: car %d dented the other way', i, j, j)
+  cj.at, cj.cool, cj.by, cj.byLevel = nil, COOLDOWN, i, speed
+end
+
 -- Where and how hard the hit so far was (since the impact began): r (world) from the car's middle, rl the same
 -- in the car's own frame, the push's direction, the speed change at the contact point and at the middle; and the
 -- car's axes (for a car not read yet). r = k^2 (dv x dw) / |dv|^2, kept inside the car's box.
@@ -1356,10 +1419,15 @@ local function updateCrash(i, dt)
     c.aBefore = c.acc:clone()
     c.touched = c.sinceContact <= CONTACT_GRACE
     c.peakLevel = 0
+    c.partner = nil
   end
   if c.at then
     c.at = c.at + dt
-    if contact then c.touched = true end
+    if contact then
+      c.touched = true
+      local w = car.collidedWith  -- (car index plus one for a car, 0 for the track)
+      if w and w > 0 then c.partner = w - 1 end
+    end
     c.peakLevel = math.max(c.peakLevel, levelJump)
     -- the hit's own change: from the velocity it would have had, still accelerating as just before
     local b, ab, t = c.before, c.aBefore, c.at
@@ -1394,25 +1462,15 @@ local function updateCrash(i, dt)
           crashDent(i, body, r, dir, speed, dvLen, rl.z, c.dented)
         elseif i == sim.focusedCar or totalVertices() < settings.maxVertices then
           -- not read yet: kept in the car's axes, and the car read first of all
-          local p = pending[i] or {}
-          pending[i] = p
-          if #p >= 3 then  -- the three hardest are enough
-            local weakest = 1
-            for k = 2, #p do if p[k].speed < p[weakest].speed then weakest = k end end
-            if p[weakest].speed < speed then table.remove(p, weakest) end
-          end
-          if #p < 3 then
-            p[#p + 1] = {r = {rl.x, rl.y, rl.z}, dir = {dir:dot(ax), dir:dot(ay), dir:dot(az)}, speed = speed, dvLen = dvLen}
-          end
-          trace('crash: car %d (not read yet), %.1f m/s: reading it to dent it', i, speed)
-          requestSetup(i, true)
+          addPending(i, rl, vec3(dir:dot(ax), dir:dot(ay), dir:dot(az)), speed, dvLen)
         end
+        if c.partner then mirrorCrash(i, c.partner, carMiddle(i, car) + r, dir, speed, dvLen) end
         c.dented = speed
       end
     end
     if done then
       c.at = nil
-      if c.dented > 0 then c.cool = COOLDOWN end
+      if c.dented > 0 then c.cool, c.by = COOLDOWN, nil end
     end
   end
   if not c.at and not teleported then

@@ -140,6 +140,55 @@ local frames = 0
 while (H6.altered.body or 0) == sent0 and frames < 200 do H6.frame() frames = frames + 1 end
 check(c6[1] and c6[1].state == 'reading meshes', 'the other car still being read: ' .. tostring(c6[1] and c6[1].state))
 check(frames < 30, ('the dent showed after %d frames, before the reading finished'):format(frames))
+-- car to car: the watched car rear-ends the other (AC's contact says car 1): the other's rear dents about as much
+-- as the watched car's front, and once (its own reading of the hit is dropped)
+local H7 = require('tests/scene_mock')({n = 12, cars = 2, ahead = true})
+H7.storage.atoms = os.getenv('ATOMS') or 'hull'
+H7.load()
+H7.settle()
+for _ = 1, 10 do H7.frame() end
+H7.settle()
+local c7 = H7.state.cars
+check(c7[0] and c7[0].state == 'ready' and c7[1] and c7[1].state == 'ready', '(both cars read)')
+local o0, o1 = H7.bodyMesh.vertices:copy(), H7.body2Mesh.vertices:copy()
+local fwd7 = H7.bodyWorld:transformVector(vec3(0, 0, 1))
+local v7 = 0
+while v7 < 12 do v7 = v7 + 5 / 60 H7.car.velocity:set(fwd7 * v7) H7.frame() end
+for _ = 1, 30 do H7.frame() end
+-- the hit: the watched car from 12 to 5 m/s, the other pushed from 0 to 7 (it reports no contact: a remote car)
+H7.car.collidedWith = 2
+for k = 1, 3 do
+  H7.car.collisionDepth = 0.05
+  H7.car.velocity:set(fwd7 * (12 - 7 * k / 3))
+  H7.car2.velocity:set(fwd7 * (7 * k / 3))
+  H7.frame()
+end
+H7.car.collisionDepth, H7.car.collidedWith = 0, -1
+for _ = 1, 30 do H7.frame() end
+H7.settle()
+for _ = 1, 40 do H7.frame() end
+H7.settle()
+local function deepest(buf, ref, front)
+  local d, n = 0, 0
+  for i = 0, ref.n - 1 do
+    local a, b = buf.raw[i].pos, ref.raw[i].pos
+    local m = math.sqrt((a.x - b.x) ^ 2 + (a.y - b.y) ^ 2 + (a.z - b.z) ^ 2)
+    if m > 1e-6 then
+      d = math.max(d, m)
+      if (front and b.z > 1.0) or (not front and b.z < -1.0) then n = n + 1 end
+    end
+  end
+  return d, n
+end
+local d0, n0 = deepest(H7.bodyMesh.vertices, o0, true)
+local d1, n1 = deepest(H7.body2Mesh.vertices, o1, false)
+print(('rear-end: watched car front %.3f m (%d at the front), other car %.3f m (%d at the rear), crashes %s and %s'):format(
+  d0, n0, d1, n1, tostring(c7[0].crashes), tostring(c7[1].crashes)))
+check(d0 > 0.02 and n0 > 0, 'the watched car\'s front dents')
+check(d1 > 0.02 and n1 > 0, 'the other car\'s rear dents')
+check(d1 > d0 * 0.6 and d1 < d0 / 0.6, 'about as much')
+check((c7[0].crashes or 0) == 1 and (c7[1].crashes or 0) == 1, 'once each')
+for _, b in pairs(c7) do check(not b.error, 'no errors: ' .. tostring(b.error)) end
 for _, b in pairs(cars) do check(not b.error, 'no errors: ' .. tostring(b.error)) end
 print(fails == 0 and 'cars test passed' or ('cars test: ' .. fails .. ' failed'))
 os.exit(fails == 0 and 0 or 1)

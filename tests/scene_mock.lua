@@ -154,6 +154,9 @@ return function(opts)
   wheel.meshes = {H.wheelMesh}
   -- a second car (opts.cars = 2): the same box body, 30 m away, turned the other way
   H.body2World = H.rotY(-1.0, 130, 2, -50)
+  if opts.ahead then  -- (opts.ahead: right in front of the first car, facing the same way, 0.2 m between them)
+    H.body2World = H.rotY(0.5, 100 + math.sin(0.5) * 4.6 * S, 2, -50 + math.cos(0.5) * 4.6 * S)
+  end
   local root2 = node('carRoot:1', H.rotY(0))
   local body2 = node('BODYTR', H.body2World, root2)
   H.body2Mesh = {name = 'body', parent = body2, vertices = buffer(boxSurface(opts.n or 20, 1.8, 1.2, 4.4))}
