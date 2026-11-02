@@ -71,5 +71,36 @@ check(last and last.damage == 0, 'the last report: no damage left')
 H.state.dentWorld(body, W:transformPoint(vec3(0, 0.6, 2.2)), W:transformVector(vec3(0, 0, -1)), 0.1, 0.6)
 H.settle()
 check(deepest(H.bodyMesh.vertices, orig) > 0.03, 'a new dent after it')
+-- a light whose material can't be changed (an error from CSP, as in game): the light left on, and every other mesh
+-- still sent and repaired to the end, slowly and at once
+do
+  local H2 = require('tests/scene_mock')({n = 20, materialError = true, lights = {LIGHT_0 = {NAME = {'headlight_glass'}}}})
+  H2.storage.atoms = os.getenv('ATOMS') or 'hull'
+  local o, ol, od = H2.bodyMesh.vertices:copy(), H2.lensMesh.vertices:copy(), H2.doorMesh.vertices:copy()
+  H2.load() H2.settle() for _ = 1, 5 do H2.frame() end H2.settle()
+  local b2, W2 = H2.state.cars[0], H2.bodyWorld
+  for round = 1, 2 do
+    H2.state.dentWorld(b2, W2:transformPoint(vec3(0.5, 0.7, 2.2)), W2:transformVector(vec3(0, 0, -1)), 0.3, 0.6)
+    H2.state.dentWorld(b2, W2:transformPoint(vec3(0.9, 0.5, 0.3)), W2:transformVector(vec3(-1, 0, 0)), 0.3, 0.6)
+    H2.settle() for _ = 1, 30 do H2.frame() end H2.settle()
+    check(deepest(H2.bodyMesh.vertices, o) > 0.1 and deepest(H2.lensMesh.vertices, ol) > 0.01 and deepest(H2.doorMesh.vertices, od) > 0.01,
+      'the body, the light and the door dented (round ' .. round .. ')')
+    if round == 1 then
+      H2.controls[BUTTON] = true
+      for _ = 1, 1200 do H2.frame() end
+      H2.controls[BUTTON] = nil
+    else
+      H2.jumps[0](0)
+    end
+    H2.settle() for _ = 1, 30 do H2.frame() end H2.settle()
+    local db, dl, dd = deepest(H2.bodyMesh.vertices, o), deepest(H2.lensMesh.vertices, ol), deepest(H2.doorMesh.vertices, od)
+    check(db < 1e-6 and dl < 1e-6 and dd < 1e-6, ('%s with a light that errors: all back (body %.4f, light %.4f, door %.4f)'):format(
+      round == 1 and 'repaired slowly' or 'repaired at once', db, dl, dd))
+  end
+  local f = io.open((os.getenv('TMPDIR') or '/tmp') .. '/softdamage_trace.txt')
+  local text = f and f:read('*a') or ''
+  if f then f:close() end
+  check(text:find('could not be turned off: ', 1, true), 'the error traced')
+end
 print(fails == 0 and 'repair test passed' or ('repair test: ' .. fails .. ' failed'))
 os.exit(fails == 0 and 0 or 1)

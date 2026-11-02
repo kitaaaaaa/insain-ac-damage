@@ -196,23 +196,32 @@ end
 
 -- A light dented (any of its vertices moved): turned off, its glow (ksEmissive) set to nothing on its own
 -- material (so other meshes sharing it stay lit). Back on when the car's repaired.
+-- (each step traced, and an error kept to the light: it once stopped the rest of a frame's meshes being sent)
 local function lightOff(mesh)
+  mesh.lightOff = true  -- (tried once: not again on every send)
   local r = mesh.copy or mesh.ref
-  r:ensureUniqueMaterials()
-  local e = r:getMaterialPropertyValue('ksEmissive')
-  if e == nil then trace('light "%s" (%s): no ksEmissive, left on', mesh.name, mesh.light) mesh.lightOff = true return end
-  local zero = type(e) == 'number' and 0 or (e.w ~= nil and vec4(0, 0, 0, 0) or vec3(0, 0, 0))
-  r:setMaterialProperty('ksEmissive', zero)
-  mesh.lightOff, mesh.lightRef, mesh.emissive = true, r, e
-  trace('light "%s" (%s): dented, turned off (ksEmissive was %s)', mesh.name, mesh.light, tostring(e))
+  local ok, err = pcall(function()
+    trace('light "%s" (%s): dented; ensureUniqueMaterials', mesh.name, mesh.light)
+    r:ensureUniqueMaterials()
+    trace('light "%s": getMaterialPropertyValue ksEmissive', mesh.name)
+    local e = r:getMaterialPropertyValue('ksEmissive')
+    trace('light "%s": ksEmissive is %s (%s)', mesh.name, tostring(e), type(e))
+    if e == nil then trace('light "%s": no ksEmissive, left on', mesh.name) return end
+    local zero = type(e) == 'number' and 0 or e:clone():scale(0)
+    r:setMaterialProperty('ksEmissive', zero)
+    mesh.lightRef, mesh.emissive = r, e
+    trace('light "%s": turned off', mesh.name)
+  end)
+  if not ok then trace('light "%s": could not be turned off: %s', mesh.name, tostring(err)) end
 end
 local function lightOn(mesh)
   if not mesh.lightOff then return end
-  if mesh.lightRef and mesh.emissive ~= nil then
-    mesh.lightRef:setMaterialProperty('ksEmissive', mesh.emissive)
-    trace('light "%s" (%s): repaired, back on', mesh.name, mesh.light)
-  end
+  local r, e = mesh.lightRef, mesh.emissive
   mesh.lightOff, mesh.lightRef, mesh.emissive = nil, nil, nil
+  if r and e ~= nil then
+    local ok, err = pcall(function() r:setMaterialProperty('ksEmissive', e) end)
+    trace(ok and 'light "%s": repaired, back on' or 'light "%s": could not be turned back on: %s', mesh.name, tostring(err))
+  end
 end
 
 -- Reads the body meshes of car i: their vertices in the body's own coordinates (BODYTR space), once.
@@ -1607,7 +1616,9 @@ local function sendQueued()
       if sent > 0 and sent + mesh.n > settings.sendBudget then
         sendQueue[#sendQueue + 1] = mesh
       else
-        send(mesh)
+        -- (one mesh failing never stops the rest being sent)
+        local ok, err = pcall(send, mesh)
+        if not ok and not mesh.sendWarned then mesh.sendWarned = true trace('sending "%s" failed: %s', mesh.name, tostring(err)) end
         sent = sent + mesh.n
       end
     end

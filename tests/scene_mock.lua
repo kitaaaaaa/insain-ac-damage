@@ -11,6 +11,8 @@ return function(opts)
   function vec2(x, y) return {x = x or 0, y = y or 0} end
   function V:set(x, y, z) if type(x) == 'table' then self.x, self.y, self.z = x.x, x.y, x.z else self.x, self.y, self.z = x, y, z end return self end
   function V:clone() return vec3(self.x, self.y, self.z) end
+  -- (CSP: scale(multiplier, out): itself or out scaled, returned)
+  function V:scale(k, out) out = out or self out.x, out.y, out.z = self.x * k, self.y * k, self.z * k return out end
   function V:dot(o) return self.x * o.x + self.y * o.y + self.z * o.z end
   function V:lengthSquared() return self:dot(self) end
   function V:length() return math.sqrt(self:dot(self)) end
@@ -217,6 +219,7 @@ return function(opts)
     return (m.emissive or vec3(5, 5, 5)):clone()
   end
   function Ref:setMaterialProperty(prop, v)
+    if opts.materialError then error('material property refused (test)') end
     for _, m in ipairs(self.items) do
       if prop == 'ksEmissive' then
         if not m.unique then H.sharedMaterialSet = true end
