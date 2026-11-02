@@ -1228,6 +1228,11 @@ end
 local IMPACT_ACCEL, IMPACT_WINDOW, MIN_HIT, COOLDOWN, FROM_BELOW = 30, 0.15, 2.5, 0.3, 0.15
 local CONTACT_GRACE, NO_CONTACT_ACCEL, TYRE_MU, LIGHT_MIN = 0.1, 80, 2.0, 0.3
 local STEP = 3  -- m/s: a hit still building gets more dent each time it's this much harder
+-- Light dents (under MIN_HIT: contacts) are limited, for the work each one costs (the car re-skinned and sent):
+-- a car kept touching something (stuck in a wall, fallen off the map) dented lightly once a LIGHT_GAP seconds at
+-- most, and LIGHT_RATE a second at most over every car. Harder hits aren't limited
+local LIGHT_GAP, LIGHT_RATE = 1, 4
+local lightTokens, crashClock = LIGHT_RATE, 0
 local crash = {}
 
 -- The car's spin over the last frame (rad/s, world), from its axes then and now: for a small turn by angle t
@@ -1291,8 +1296,11 @@ local function makeCrashDent(i, body, r, dir, speed, dvLen, along, from)
   from = from or 0
   local depth = (math.min(settings.maxOffset, crashDepth(speed)) - (from > 0 and math.min(settings.maxOffset, crashDepth(from)) or 0)) * body.scale
   if depth <= 0 then return end
-  trace('crash: car %d, %.1f m/s at the contact (%.1f at the middle), %.2f m from the middle (along %.2f): dent %.3f m%s',
-    i, speed, dvLen, r:length(), along, depth, from > 0 and (' more (was %.1f m/s)'):format(from) or '')
+  local hl = inv:transformPoint(hit)
+  local e = (hl.z - (mn[3] + mx[3]) / 2) * (body.forward or 1) / math.max(0.1, mx[3] - mn[3])
+  local where = e > 0.25 and 'front' or e < -0.25 and 'rear' or 'side'
+  trace('crash: car %d, %.1f m/s at the contact (%.1f at the middle), %.2f m from the middle (along %.2f): dent %.3f m at the %s%s',
+    i, speed, dvLen, r:length(), along, depth, where, from > 0 and (' more (was %.1f m/s)'):format(from) or '')
   -- harder hits go deeper, not wider (a wide dent looked like the whole corner hit from all sides)
   dentWorld(body, hit, dir, depth, math.min(0.6, 0.35 + 0.01 * speed) * body.scale, speed / 12)
   body.lastCrash = speed
@@ -1453,6 +1461,9 @@ local function updateCrash(i, dt)
   local vel, pv = car.velocity, c.prevVel
   local ax_, ay_, az_ = (vel.x - pv.x) / dt, (vel.y - pv.y) / dt, (vel.z - pv.z) / dt
   local jump = math.sqrt(ax_ * ax_ + ay_ * ay_ + az_ * az_)
+  -- (what opens an impact: a sudden change from what the car was just doing, not hard braking or cornering kept
+  -- up: that kept opening windows, and the acceleration it's measured against stopped following the car)
+  local change = math.sqrt((ax_ - c.acc.x) ^ 2 + (ay_ - c.acc.y) ^ 2 + (az_ - c.acc.z) ^ 2)
   local spinJump = math.sqrt((wx - c.w[1]) ^ 2 + (wy - c.w[2]) ^ 2 + (wz - c.w[3]) ^ 2) / dt * halfLen
   -- level in the car's frame (no up or down part: landings, kerbs)
   local up = car.up
@@ -1460,13 +1471,13 @@ local function updateCrash(i, dt)
   local levelJump = math.sqrt(math.max(0, jump * jump - au * au))
   local contact = car.collisionDepth > 0
   c.sinceContact = contact and 0 or c.sinceContact + dt
-  if not c.at and not teleported and c.cool == 0 and (jump + spinJump > IMPACT_ACCEL or contact) then
+  if not c.at and not teleported and c.cool == 0 and (change + spinJump > IMPACT_ACCEL or contact) then
     c.at, c.before, c.maxDv, c.dented = 0, c.prevVel:clone(), vec3(), 0
     c.wBefore = {c.w[1], c.w[2], c.w[3]}
     c.aBefore = c.acc:clone()
     c.touched = c.sinceContact <= CONTACT_GRACE
     c.peakLevel = 0
-    c.partner = nil
+    c.partner, c.held = nil, nil
   end
   if c.at then
     c.at = c.at + dt
@@ -1495,12 +1506,38 @@ local function updateCrash(i, dt)
     end
     if real and (ready or done) then
       local r, rl, dir, speed, dvLen, ax, ay, az = crashHit(car, body, ready, c, wx, wy, wz, L, Wd, Hd)
+      -- a car hit (AC's contact names it): where and which way from where the two cars are, not from the motion
+      -- (a hit's first frames can point any way): pushed from the other car's middle towards this one's, at the
+      -- point between them
+      local other = r and c.partner and c.partner ~= i and ac.getCar(c.partner)
+      if other then
+        local mi, mj = carMiddle(i, car), carMiddle(c.partner, other)
+        local d = mi - mj
+        if d:length() > 0.1 then
+          dir = d:normalize()
+          r = (mj - mi) * 0.5
+          if ready then rl = body.node:getWorldTransformationRaw():inverse():transformVector(r)
+          else rl = vec3(r:dot(ax), r:dot(ay), r:dot(az)) end
+        else
+          other = nil
+        end
+      end
       local least = c.touched and LIGHT_MIN or MIN_HIT
+      -- a light wall hit's first reading can point any way: dented once the next frame's points the same way
+      if speed and not other and c.dented == 0 and speed < MIN_HIT then
+        local same = c.held and c.held:dot(dir) > 0.7
+        c.held = dir:clone()
+        if not same then speed = nil end
+      end
+      local light = speed and c.dented == 0 and speed < MIN_HIT
+      if light and ((c.lightAt and crashClock - c.lightAt < LIGHT_GAP) or lightTokens < 1) then speed = nil end
       if speed and speed > least and dvLen > 1e-3 and speed >= c.dented + (c.dented > 0 and STEP or 0) then
+        if light then c.lightAt, lightTokens = crashClock, lightTokens - 1 end
         if ready then
-          -- one impact, one place and one way: what it adds as it builds goes where the first dent went
+          -- one impact, one place and one way: what it adds as it builds goes where the first clear dent went
           local W = body.node:getWorldTransformationRaw()
-          if c.dented == 0 then
+          -- (a wall hit that began light, now clear: aimed again from this, its first frames could point any way)
+          if c.dented == 0 or (not other and c.dented < MIN_HIT and speed >= MIN_HIT) then
             local inv = W:inverse()
             c.hitR, c.hitDir = inv:transformVector(r), inv:transformVector(dir)
           else
@@ -1673,6 +1710,8 @@ function script.update(dt)
   -- crashes: every car that's read, and (all cars on) every car in the session
   local tCrash = nowMs()
   if settings.crashDents and not sim.isPaused and not sim.isReplayActive then
+    crashClock = crashClock + (dt or 0)
+    lightTokens = math.min(LIGHT_RATE, lightTokens + (dt or 0) * LIGHT_RATE)
     if settings.readWatched and settings.allCars then
       for ci = 0, (sim.carsCount or 1) - 1 do
         local car = ac.getCar(ci)

@@ -198,6 +198,47 @@ H7.jumps[0](0)
 H7.settle()
 for _ = 1, 5 do H7.frame() end
 check(glow(H7.lensMesh) == 15, 'repaired: back on')
+-- the same hit, but its first frame pointing the wrong way (the car still speeding up: +0.8 m/s with the contact),
+-- then the hard part: the watched car's front and the other's rear still, not the other ends
+local function ends(buf, ref)
+  local f, r = 0, 0
+  for k = 0, ref.n - 1 do
+    local a, b = buf.raw[k].pos, ref.raw[k].pos
+    local m = math.sqrt((a.x - b.x) ^ 2 + (a.y - b.y) ^ 2 + (a.z - b.z) ^ 2)
+    if b.z > 1 then f = math.max(f, m) elseif b.z < -1 then r = math.max(r, m) end
+  end
+  return f, r
+end
+local function rearEnd(partner)
+  H7.jumps[0](0) H7.jumps[1](1)
+  H7.car.velocity:set(fwd7 * 12) H7.car2.velocity:set(vec3())
+  for _ = 1, 60 do H7.frame() end
+  H7.settle()
+  for _ = 1, 30 do H7.frame() end
+  local a0, a1 = H7.bodyMesh.vertices:copy(), H7.body2Mesh.vertices:copy()
+  H7.car.collidedWith = partner and 2 or 0
+  H7.car.collisionDepth = 0.05
+  H7.car.velocity:set(fwd7 * 12.8) H7.frame()
+  for k = 1, 3 do
+    H7.car.collisionDepth = 0.05
+    H7.car.velocity:set(fwd7 * (12.8 - 8 * k / 3))
+    if partner then H7.car2.velocity:set(fwd7 * (6 * k / 3)) end
+    H7.frame()
+  end
+  H7.car.collisionDepth, H7.car.collidedWith = 0, -1
+  for _ = 1, 30 do H7.frame() end
+  H7.settle() for _ = 1, 40 do H7.frame() end H7.settle()
+  local f0, r0 = ends(H7.bodyMesh.vertices, a0)
+  local f1, r1 = ends(H7.body2Mesh.vertices, a1)
+  return f0, r0, f1, r1
+end
+local f0, r0, f1, r1 = rearEnd(true)
+print(('rear-end, first frame the wrong way: watched front %.3f rear %.3f, other front %.3f rear %.3f'):format(f0, r0, f1, r1))
+check(f0 > 0.02 and r0 < 0.002, 'into a car, its first frame the wrong way: the watched car\'s front dents, not its rear')
+check(r1 > 0.02 and f1 < 0.002, 'and the other car\'s rear, not its front')
+f0, r0 = rearEnd(false)
+print(('into a wall, first frame the wrong way: front %.3f rear %.3f'):format(f0, r0))
+check(f0 > 0.02 and r0 < 0.01, 'into a wall, its first frame the wrong way: the hard part at the front (the rear at most lightly)')
 for _, b in pairs(c7) do check(not b.error, 'no errors: ' .. tostring(b.error)) end
 for _, b in pairs(cars) do check(not b.error, 'no errors: ' .. tostring(b.error)) end
 print(fails == 0 and 'cars test passed' or ('cars test: ' .. fails .. ' failed'))

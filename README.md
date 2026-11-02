@@ -140,8 +140,12 @@ head-on hit dents the front, not the windscreen. A dent needs AC to report a con
 tyre could have done it), so braking and cornering never dent, however hard a fast car does them; and only the
 hit's own change counts, not the braking or cornering going on around it. A light contact (a door bang, a
 clipped wall) leaves a light dent. Landing a jump is mostly the suspension's job, so it dents little.
-When AC says the contact was with another car, that car gets the same hit at the same spot, pushed the other
-way: rear-end a car and its rear dents about as much as your front (as its location's give allows).
+When AC says the contact was with another car, where it hit and which way come from where the two cars are,
+not from the motion (a hit's first instant can point any way), and that car gets the same hit at the same spot,
+pushed the other way: rear-end a car and your front and its rear dent, about as much (as each location's give
+allows). A light hit on anything else dents once two frames agree on which way it pushed. A car kept touching
+something (stuck in a wall, fallen off the map) dents lightly once a second at most, and light dents over all
+cars come four a second at most, for the work each costs; harder hits aren't limited.
 
 ## The window
 

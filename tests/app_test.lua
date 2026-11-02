@@ -362,6 +362,29 @@ H.car.velocity:set(fwd * 20) H.frame()
 H.settle()
 local nSide, sideDepth = moved(H.bodyMesh.vertices, orig, function(p) return p.x > 0.3 end)
 check(crashes() == before + 1 and nSide > 0 and sideDepth < 0.02, 'doors banging: a light dent on the side hit: ' .. nSide .. ', ' .. sideDepth)
+-- a car stuck touching something (in a wall): nudged 0.5 m/s back and forth with a contact, for 3 s: light dents,
+-- once a second at most; then a hard hit right away still dents
+cruise(0)
+press('Repair')
+H.settle()
+before = crashes()
+for f = 1, 180 do
+  H.car.collisionDepth = 0.02
+  H.car.velocity:set(side * ((f % 20 < 10) and 0.5 or -0.5))
+  H.frame()
+end
+H.car.collisionDepth = 0
+H.car.velocity:set(vec3()) for _ = 1, 30 do H.frame() end
+H.settle()
+local stuck = crashes() - before
+check(stuck >= 2 and stuck <= 4, 'stuck in contact for 3 s: light dents once a second at most: ' .. stuck)
+before = crashes()
+H.car.collisionDepth = 0.05 H.car.velocity:set(fwd * -8) H.frame() H.car.collisionDepth = 0
+for _ = 1, 20 do H.car.velocity:set(fwd * -8) H.frame() end
+H.car.velocity:set(vec3()) for _ = 1, 30 do H.frame() end
+H.settle()
+check(crashes() == before + 1 and body.lastCrash > 2.5, 'a hard hit straight after: dented, not limited: ' .. tostring(body.lastCrash))
+current = 0
 -- harder hits: deeper and crunchier
 local function hitAt(speed)
   cruise(speed)
